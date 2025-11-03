@@ -10,7 +10,7 @@
 #include "time_if.h"
 #include "net_if.h"
 #include "parser_hex.h"
-#include "ble_cfg_if.h" // Bluetooth ayar servisi arayüzü
+#include "ble_system_if.h"
 #include "nvs_flash.h"
 #include "include/state_machine.h"
 
@@ -39,7 +39,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "--- Sistem Başlatılıyor: Donanım/Yazılım Init Evresi ---");
 
     ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(ble_cfg_init());   // Bluetooth Ayar Servisi
+    ESP_ERROR_CHECK(ble_system_init());
 
     // 1. Temel Tek Seferlik Başlatmalar
     //ESP_ERROR_CHECK(cfg_init());       // NVS
