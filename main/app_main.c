@@ -13,6 +13,7 @@
 #include "ble_system_if.h"
 #include "nvs_flash.h"
 #include "include/state_machine.h"
+#include "ble_led_if.h"
 
 static const char *TAG = "APP_MAIN";
 
@@ -38,6 +39,7 @@ void comm_manager_task(void *pvParameters) {
 void app_main(void) {
     ESP_LOGI(TAG, "--- Sistem Başlatılıyor: Donanım/Yazılım Init Evresi ---");
 
+    ble_led_init();
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(ble_system_init());
 

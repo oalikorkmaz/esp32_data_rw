@@ -5,6 +5,7 @@
 #include "nimble/nimble_port.h"
 #include "host/ble_hs.h"
 #include "services/gap/ble_svc_gap.h"
+#include "ble_led_if.h"
 
 static const char *TAG = "BLE_CTRL";
 static bool ble_enabled = false;
@@ -25,6 +26,7 @@ esp_err_t ble_ctrl_start(void)
     ESP_ERROR_CHECK(nimble_port_init());
     ble_enabled = true;
     ESP_LOGI(TAG, "BLE started.");
+    ble_led_set(true); // led yanar
     return ble_cfg_start();
 }
 
@@ -40,6 +42,7 @@ esp_err_t ble_ctrl_stop(void)
     nimble_port_deinit();
 
     ble_enabled = false;
+    ble_led_set(false); // led söner
     ESP_LOGI(TAG, "BLE stopped.");
     return ESP_OK;
 }

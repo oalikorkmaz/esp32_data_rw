@@ -4,7 +4,8 @@ idf_component_register(
         "ble_ctrl_start_stop.c"
         "ble_cfg_service.c"
         "ble_button_control.c"
+        "ble_led_indicator.c"
     INCLUDE_DIRS "include"
-    REQUIRES freertos nvs_flash bt driver esp_driver_gpio
+    REQUIRES freertos nvs_flash bt driver esp_driver_gpio led_strip
 )
                        
