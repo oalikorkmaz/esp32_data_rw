@@ -63,6 +63,9 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
             ESP_LOGI(TAG_NET, "Ağ Maskesi: %s", netmask);
             ESP_LOGI(TAG_NET, "Ağ Geçidi : %s", gw);
             ESP_LOGI(TAG_NET, "~~~~~~~~~~~");
+            
+            // IP alındıktan sonra ping task'ını başlat
+            start_ping_task();
             break;
         }
         default:

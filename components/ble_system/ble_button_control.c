@@ -5,7 +5,7 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
-#define BTN_GPIO GPIO_NUM_7
+#define BTN_GPIO GPIO_NUM_21
 #define HOLD_MS 3000
 
 static const char *TAG = "BLE_BTN";
