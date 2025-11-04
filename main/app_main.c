@@ -13,7 +13,7 @@
 #include "ble_system_if.h"
 #include "nvs_flash.h"
 #include "include/state_machine.h"
-#include "net_eth_if.h"
+#include "ethernet_init.h"
 
 
 static const char *TAG = "APP_MAIN";
@@ -43,18 +43,24 @@ void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(ble_system_init());
 
-        // --- Ethernet Test Başlangıcı ---
-    ESP_LOGI(TAG, "Ethernet testi başlatılıyor...");
+    // 1. Ethernet'i Başlat
+    ESP_LOGI(TAG, "W5500 Ethernet başlatılıyor...");
+    esp_err_t ret = start_w5500_ethernet();
 
-    // Ethernet başlat
-    if (net_eth_start() == ESP_OK) {
-        ESP_LOGI(TAG, "Ethernet başlatıldı, IP alınması bekleniyor...");
-        vTaskDelay(pdMS_TO_TICKS(8000)); // IP alınması için 8 sn bekle
-        net_eth_ping_test();
-    } else {
-        ESP_LOGE(TAG, "Ethernet başlatılamadı!");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Ethernet Başlatma Başarısız! Hata Kodu: %d", ret);
+        return;
     }
-    // --- Ethernet Test Sonu ---
+
+    ESP_LOGI(TAG, "Ethernet Başlatıldı. IP adresi bekleniyor...");
+
+    // 2. Uygulama döngüsü
+    int counter = 0;
+    while (1) {
+        // Burada uygulamanızın diğer işlerini yapabilirsiniz
+        ESP_LOGI(TAG, "Uygulama Çalışıyor. Sayıcı: %d", counter++);
+        vTaskDelay(pdMS_TO_TICKS(5000)); // 5 saniye bekle
+    }
 
     // 1. Temel Tek Seferlik Başlatmalar
     //ESP_ERROR_CHECK(cfg_init());       // NVS

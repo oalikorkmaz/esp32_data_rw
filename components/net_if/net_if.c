@@ -51,7 +51,7 @@ esp_err_t net_set_mode(net_mode_t mode)
     // Yeni modu başlat
     switch (mode) {
         case NET_MODE_ETHERNET:
-            ESP_ERROR_CHECK(net_eth_init());
+            //ESP_ERROR_CHECK(net_eth_init());
             ESP_ERROR_CHECK(net_eth_start());
             break;
 
@@ -86,7 +86,7 @@ bool net_is_connected(void)
 {
     switch (s_current_mode) {
         case NET_MODE_ETHERNET:
-            return net_eth_is_connected();
+            //return net_eth_is_connected();
         // case NET_MODE_WIFI:
         //     return net_wifi_is_connected();
         // case NET_MODE_GSM:

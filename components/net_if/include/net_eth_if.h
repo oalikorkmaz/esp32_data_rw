@@ -1,8 +1,18 @@
-#pragma once
-#include "esp_err.h"
-#include <stdbool.h>
+#ifndef NET_ETH_IF_H
+#define NET_ETH_IF_H
 
-esp_err_t net_eth_init(void);
+#include "esp_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 esp_err_t net_eth_start(void);
 esp_err_t net_eth_stop(void);
-bool net_eth_is_connected(void);
+esp_err_t net_eth_ping_test(void);   // 🔹 Eksik olan satır eklendi
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // NET_ETH_IF_H
