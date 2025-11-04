@@ -1,11 +1,13 @@
-#include "esp_eth.h"
 #include "net_manager.h"
-#include "ethernet_init.h"
+#include "esp_eth.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
+#include "ethernet_init.h"
+#include "wifi_init.h"
+
 
 static const char *TAG = "NET_MANAGER";
 
@@ -16,7 +18,7 @@ static esp_eth_netif_glue_handle_t s_glue = NULL;
 static esp_netif_t *s_netif = NULL;
 static bool s_connected = false;
 static bool s_eth_link_up = false;
-
+static bool s_eth_present = false;
 
 /* Handle bildirimi */
 void net_manager_set_eth_handle(esp_eth_handle_t handle,
@@ -28,7 +30,7 @@ void net_manager_set_eth_handle(esp_eth_handle_t handle,
     s_netif = netif;
 }
 
-/* Kapatma fonksiyonu — önceki sürümdekiyle aynı */
+/* Kapatma fonksiyonu */
 static void stop_current_connection(void)
 {
     if (s_eth_handle) {
@@ -48,17 +50,80 @@ static void stop_current_connection(void)
     }
 }
 
+/* Ethernet olay bildirimi */
 void net_manager_on_eth_event(bool link_up)
 {
     s_eth_link_up = link_up;
-    ESP_LOGI("NET_MANAGER", "Ethernet bağlantı durumu: %s", link_up ? "UP" : "DOWN");
+    ESP_LOGI(TAG, "Ethernet bağlantı durumu: %s", link_up ? "UP" : "DOWN");
 }
 
+/* Wi-Fi olay bildirimi */
+void net_manager_on_wifi_event(bool connected)
+{
+    s_connected = connected;
+    ESP_LOGI(TAG, "Wi-Fi bağlantı durumu: %s", connected ? "UP" : "DOWN");
+}
+
+/* Bağlantı durumu kontrolü */
 static bool net_manager_check_connection(void)
 {
     if (s_current_mode == NET_MODE_ETHERNET)
         return s_eth_link_up;
     return s_connected;
+}
+
+/* Ethernet donanım kontrolü (basit tespit) */
+static bool check_w5500_presence(void)
+{
+    spi_device_handle_t spi;
+    spi_bus_config_t buscfg = {
+        .miso_io_num = PIN_MISO,
+        .mosi_io_num = PIN_MOSI,
+        .sclk_io_num = PIN_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+    };
+    spi_device_interface_config_t devcfg = {
+        .mode = 0,
+        .clock_speed_hz = 1 * 1000 * 1000,
+        .spics_io_num = PIN_CS,
+        .queue_size = 1,
+    };
+
+    esp_err_t ret = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "SPI bus başlatılamadı, W5500 tespit atlanıyor.");
+        return false;
+    }
+
+    spi_bus_add_device(SPI3_HOST, &devcfg, &spi);
+
+    // W5500 Version Register = 0x0039
+    uint8_t tx[4] = {0x00, 0x39, 0x00, 0x00};
+    uint8_t rx[4] = {0};
+    spi_transaction_t t = {
+        .length = 32,
+        .tx_buffer = tx,
+        .rx_buffer = rx,
+    };
+    esp_err_t tr = spi_device_transmit(spi, &t);
+
+    spi_bus_remove_device(spi);
+    spi_bus_free(SPI3_HOST);
+
+    if (tr != ESP_OK) {
+        ESP_LOGW(TAG, "W5500 SPI iletişimi başarısız (%s)", esp_err_to_name(tr));
+        return false;
+    }
+
+    uint8_t version = rx[3];
+    if (version == 0x03 || version == 0x04) {
+        ESP_LOGI(TAG, "W5500 modülü tespit edildi (version=0x%02X).", version);
+        return true;
+    } else {
+        ESP_LOGW(TAG, "W5500 modülü tespit edilemedi (version=0x%02X).", version);
+        return false;
+    }
 }
 
 /* Modu değiştir */
@@ -74,16 +139,29 @@ void net_manager_start(void)
     switch (s_current_mode) {
     case NET_MODE_ETHERNET:
         ESP_LOGI(TAG, "Ethernet başlatılıyor...");
+
+        // W5500 donanım kontrolü
+        s_eth_present = check_w5500_presence();
+        if (!s_eth_present) {
+            ESP_LOGW(TAG, "Ethernet donanımı bulunamadı, WiFi moduna geçiliyor...");
+            s_current_mode = NET_MODE_WIFI;
+            net_manager_start();
+            return;
+        }
+
         start_w5500_ethernet();
         break;
+
     case NET_MODE_WIFI:
         ESP_LOGI(TAG, "WiFi başlatılıyor...");
-        // start_wifi(); // gelecek adım
+        start_wifi_station();
         break;
+
     case NET_MODE_GSM:
         ESP_LOGI(TAG, "GSM başlatılıyor...");
         // start_gsm(); // gelecek adım
         break;
+
     default:
         break;
     }
@@ -95,8 +173,8 @@ static void net_manager_task(void *arg)
     while (1) {
         if (!net_manager_check_connection()) {
             ESP_LOGW(TAG, "Ağ bağlantısı yok, sonraki moda geçiliyor...");
-
             stop_current_connection();
+
             switch (s_current_mode) {
             case NET_MODE_ETHERNET:
                 s_current_mode = NET_MODE_WIFI;

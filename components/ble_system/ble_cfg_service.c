@@ -9,6 +9,10 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "net_manager.h"   // 🔹 ağ modu seçimi
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "string.h"
+
 
 static const char *TAG = "BLE_CFG";
 #define DEVICE_NAME "ESP CFG"
@@ -77,18 +81,54 @@ static void ble_on_sync(void)
 static int cfg_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                         struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        char buf[32] = {0};
-        memcpy(buf, ctxt->om->om_data, ctxt->om->om_len);
-        ESP_LOGI(TAG, "BLE'den gelen veri: %s", buf);
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
+        return 0;
 
-        int mode = atoi(buf); // "0","1","2"
+    char buf[64] = {0};
+    int len = OS_MBUF_PKTLEN(ctxt->om);
+    os_mbuf_copydata(ctxt->om, 0, len, buf);
+    buf[len] = '\0';
+    ESP_LOGI(TAG, "BLE'den gelen veri: %s", buf);
+
+    /* ------------------------------------------------------------
+     * 1️⃣ Wi-Fi yapılandırma verisi (örnek: wifi:SSID,PASS)
+     * ------------------------------------------------------------ */
+    if (strncmp(buf, "wifi:", 5) == 0) {
+        char *ssid = strtok(buf + 5, ",");
+        char *pass = strtok(NULL, ",");
+        if (ssid && pass) {
+            // NVS’ye kaydet
+            nvs_handle_t handle;
+            if (nvs_open("wifi_cfg", NVS_READWRITE, &handle) == ESP_OK) {
+                nvs_set_str(handle, "ssid", ssid);
+                nvs_set_str(handle, "pass", pass);
+                nvs_commit(handle);
+                nvs_close(handle);
+                ESP_LOGI(TAG, "Wi-Fi bilgileri kaydedildi → SSID: %s", ssid);
+            } else {
+                ESP_LOGE(TAG, "Wi-Fi bilgileri kaydedilemedi (NVS hatası).");
+            }
+        } else {
+            ESP_LOGW(TAG, "Wi-Fi format hatalı! Beklenen: wifi:SSID,PASS");
+        }
+        return 0;
+    }
+
+    /* ------------------------------------------------------------
+     * 2️⃣ Ağ modu seçimi ("0"=Ethernet, "1"=Wi-Fi, "2"=GSM)
+     * ------------------------------------------------------------ */
+    int mode = atoi(buf);
+    if (mode >= 0 && mode <= 2) {
         net_manager_set_mode((net_mode_t)mode);
         net_manager_start();
         ESP_LOGI(TAG, "Ağ modu değiştirildi -> %d", mode);
+    } else {
+        ESP_LOGW(TAG, "Geçersiz ağ modu: %s", buf);
     }
+
     return 0;
 }
+
 
 /* UUID'ler ve servis tablosu */
 static const ble_uuid128_t gatt_svc_uuid =
