@@ -13,7 +13,8 @@
 #include "ble_system_if.h"
 #include "nvs_flash.h"
 #include "include/state_machine.h"
-#include "ble_led_if.h"
+#include "net_eth_if.h"
+
 
 static const char *TAG = "APP_MAIN";
 
@@ -39,9 +40,21 @@ void comm_manager_task(void *pvParameters) {
 void app_main(void) {
     ESP_LOGI(TAG, "--- Sistem Başlatılıyor: Donanım/Yazılım Init Evresi ---");
 
-    ble_led_init();
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(ble_system_init());
+
+        // --- Ethernet Test Başlangıcı ---
+    ESP_LOGI(TAG, "Ethernet testi başlatılıyor...");
+
+    // Ethernet başlat
+    if (net_eth_start() == ESP_OK) {
+        ESP_LOGI(TAG, "Ethernet başlatıldı, IP alınması bekleniyor...");
+        vTaskDelay(pdMS_TO_TICKS(8000)); // IP alınması için 8 sn bekle
+        net_eth_ping_test();
+    } else {
+        ESP_LOGE(TAG, "Ethernet başlatılamadı!");
+    }
+    // --- Ethernet Test Sonu ---
 
     // 1. Temel Tek Seferlik Başlatmalar
     //ESP_ERROR_CHECK(cfg_init());       // NVS
