@@ -6,35 +6,27 @@
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "net_manager.h"
 
 /* net_eth_service.c içindeki servisleri dahil et */
 extern esp_err_t register_eth_service(void);
 extern void set_eth_handle(esp_eth_handle_t handle);
-
 static const char *TAG = "ETH_INIT";
-
-/* Global netif */
-esp_netif_t *eth_netif = NULL;
-
-/* PIN tanımları */
-#define PIN_MISO  13
-#define PIN_MOSI  11
-#define PIN_SCLK  12
-#define PIN_CS    10
-#define PIN_RST   8
-#define PIN_INT   9
-#define SPI_HOST  SPI3_HOST
-#define SPI_CLOCK_MHZ 8
 
 esp_err_t start_w5500_ethernet(void)
 {
     ESP_LOGI(TAG, "Ethernet başlatılıyor...");
 
-    /* Ağ ve olay sistemi */
+    /* Ağ sistemi */
     ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_err_t ret = esp_event_loop_create_default();
+    if (ret == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Event loop zaten oluşturulmuş, atlanıyor.");
+    } else {
+        ESP_ERROR_CHECK(ret);
+    }
 
-    /* SPI bus başlat */
+    /* SPI BUS */
     spi_bus_config_t buscfg = {
         .miso_io_num = PIN_MISO,
         .mosi_io_num = PIN_MOSI,
@@ -42,7 +34,12 @@ esp_err_t start_w5500_ethernet(void)
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
     };
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+    esp_err_t ret1 = spi_bus_initialize(SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret1 == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "SPI bus zaten başlatılmış, atlanıyor.");
+    } else {
+        ESP_ERROR_CHECK(ret1);
+    }
 
     /* Reset pini */
     gpio_config_t rst_conf = { .pin_bit_mask = 1ULL << PIN_RST, .mode = GPIO_MODE_OUTPUT };
@@ -52,11 +49,11 @@ esp_err_t start_w5500_ethernet(void)
     gpio_set_level(PIN_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    /* Netif oluştur */
+    /* Netif */
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
-    eth_netif = esp_netif_new(&cfg);
+    esp_netif_t *eth_netif = esp_netif_new(&cfg);
 
-    /* SPI cihaz ayarları */
+    /* SPI device */
     spi_device_interface_config_t devcfg = {
         .mode = 0,
         .clock_speed_hz = SPI_CLOCK_MHZ * 1000 * 1000,
@@ -64,7 +61,7 @@ esp_err_t start_w5500_ethernet(void)
         .queue_size = 20,
     };
 
-    /* MAC & PHY oluştur */
+    /* MAC & PHY */
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
     phy_config.phy_addr = 1;
@@ -76,24 +73,26 @@ esp_err_t start_w5500_ethernet(void)
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
 
-    /* Ethernet sürücüsünü kur */
+    /* Ethernet sürücüsü */
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
     esp_eth_handle_t eth_handle = NULL;
     ESP_ERROR_CHECK(esp_eth_driver_install(&eth_config, &eth_handle));
 
     /* MAC adresi ata */
-    uint8_t custom_mac[6] = {0x02, 0x00, 0x00, 0x12, 0x34, 0x56};
-    ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, custom_mac));
+    uint8_t mac_addr[6] = {0x02, 0x00, 0x00, 0x12, 0x34, 0x56};
+    ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, mac_addr));
 
     /* Netif’e bağla */
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(eth_handle);
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, glue));
 
-    /* Servisleri kaydet (IP event handler, ping vs) */
+    /* Olay işleyicisi kaydet */
     ESP_ERROR_CHECK(register_eth_service());
-    set_eth_handle(eth_handle);
 
-    /* DHCP başlat */
+    /* 🔹 Handle’ı net_manager’a bildir */
+    net_manager_set_eth_handle(eth_handle, glue, eth_netif);
+
+    /* DHCP */
     ESP_ERROR_CHECK(esp_netif_dhcpc_start(eth_netif));
 
     /* Ethernet başlat */
@@ -102,3 +101,38 @@ esp_err_t start_w5500_ethernet(void)
     ESP_LOGI(TAG, "Ethernet başlatıldı, IP bekleniyor...");
     return ESP_OK;
 }
+
+static void eth_event_handler(void *arg, esp_event_base_t event_base,
+                              int32_t event_id, void *event_data)
+{
+    if (event_base == ETH_EVENT)
+    {
+        switch (event_id)
+        {
+            case ETHERNET_EVENT_CONNECTED:
+                ESP_LOGI(TAG, "Ethernet bağlandı");
+                net_manager_on_eth_event(true);  // 🔹 net_manager’a bildir
+                break;
+
+            case ETHERNET_EVENT_DISCONNECTED:
+                ESP_LOGW(TAG, "Ethernet bağlantısı kesildi");
+                net_manager_on_eth_event(false); // 🔹 net_manager’a bildir
+                break;
+
+            case ETHERNET_EVENT_START:
+                ESP_LOGI(TAG, "Ethernet başlatıldı");
+                break;
+
+            case ETHERNET_EVENT_STOP:
+                ESP_LOGI(TAG, "Ethernet durduruldu");
+                net_manager_on_eth_event(false);
+                break;
+        }
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "IP Alındı: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+

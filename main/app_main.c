@@ -8,12 +8,12 @@
 #include "cfg_if.h"
 #include "storage_if.h"
 #include "time_if.h"
-#include "net_if.h"
 #include "parser_hex.h"
 #include "ble_system_if.h"
 #include "nvs_flash.h"
 #include "include/state_machine.h"
 #include "ethernet_init.h"
+#include "net_manager.h"
 
 
 static const char *TAG = "APP_MAIN";
@@ -42,16 +42,8 @@ void app_main(void) {
 
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(ble_system_init());
-
-    ESP_LOGI(TAG, "--- Sistem Başlatılıyor ---");
-    if (start_w5500_ethernet() == ESP_OK)
-    {
-        ESP_LOGI(TAG, "Ethernet başlatma başarılı!");
-    }
-    else
-    {
-        ESP_LOGE(TAG, "Ethernet başlatma hatası!");
-    }
+    net_manager_set_mode(NET_MODE_ETHERNET);  // Varsayılan Ethernet
+    net_manager_start();         // Ağ bağlantısını başlat
 
     // 1. Temel Tek Seferlik Başlatmalar
     //ESP_ERROR_CHECK(cfg_init());       // NVS
