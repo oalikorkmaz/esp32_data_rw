@@ -43,25 +43,14 @@ void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(ble_system_init());
 
-    ESP_LOGI(TAG, "=== ESP32-S3 W5500 Ethernet Test ===");
-
-    // 1. Ethernet'i Başlat
-    ESP_LOGI(TAG, "W5500 Ethernet başlatılıyor...");
-    esp_err_t ret = start_w5500_ethernet();
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Ethernet Başlatma Başarısız! Hata Kodu: %d", ret);
-        return;
+    ESP_LOGI(TAG, "--- Sistem Başlatılıyor ---");
+    if (start_w5500_ethernet() == ESP_OK)
+    {
+        ESP_LOGI(TAG, "Ethernet başlatma başarılı!");
     }
-
-    ESP_LOGI(TAG, "Ethernet Başlatıldı. IP adresi bekleniyor...");
-    ESP_LOGI(TAG, "IP alındığında otomatik olarak ping testi yapılacak.");
-
-    // 2. Uygulama döngüsü
-    int counter = 0;
-    while (1) {
-        ESP_LOGI(TAG, "Uygulama Çalışıyor. Sayıcı: %d", counter++);
-        vTaskDelay(pdMS_TO_TICKS(5000)); // 5 saniye bekle
+    else
+    {
+        ESP_LOGE(TAG, "Ethernet başlatma hatası!");
     }
 
     // 1. Temel Tek Seferlik Başlatmalar

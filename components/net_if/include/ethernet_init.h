@@ -7,17 +7,10 @@
 extern "C" {
 #endif
 
-/**
- * @brief W5500 Ethernet başlatma fonksiyonu
- *
- * @return
- *      - ESP_OK: Başarılı
- *      - ESP_FAIL: Hata oluştu
- */
 esp_err_t start_w5500_ethernet(void);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // ETHERNET_INIT_H
+#endif
