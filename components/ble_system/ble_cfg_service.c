@@ -120,7 +120,6 @@ static int cfg_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     int mode = atoi(buf);
     if (mode >= 0 && mode <= 2) {
         net_manager_set_mode((net_mode_t)mode);
-        net_manager_start();
         ESP_LOGI(TAG, "Ağ modu değiştirildi -> %d", mode);
     } else {
         ESP_LOGW(TAG, "Geçersiz ağ modu: %s", buf);

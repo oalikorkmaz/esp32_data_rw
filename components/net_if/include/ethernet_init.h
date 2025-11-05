@@ -17,6 +17,7 @@ extern "C" {
 #endif
 
 esp_err_t start_w5500_ethernet(void);
+void stop_w5500_ethernet(void);
 
 #ifdef __cplusplus
 }

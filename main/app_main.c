@@ -43,7 +43,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(ble_system_init());
     net_manager_set_mode(NET_MODE_ETHERNET);  // Varsayılan Ethernet
-    net_manager_start();         // Ağ bağlantısını başlat
+    net_manager_create_task();
 
     // 1. Temel Tek Seferlik Başlatmalar
     //ESP_ERROR_CHECK(cfg_init());       // NVS

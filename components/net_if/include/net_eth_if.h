@@ -9,7 +9,7 @@ extern "C" {
 
 esp_err_t net_eth_start(void);
 esp_err_t net_eth_stop(void);
-esp_err_t net_eth_ping_test(void);   // 🔹 Eksik olan satır eklendi
+
 
 #ifdef __cplusplus
 }

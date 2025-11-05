@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 esp_err_t start_wifi_station(void);
+void stop_wifi_station(void);
 bool wifi_is_connected(void);
 
 #endif

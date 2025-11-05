@@ -1,165 +1,171 @@
 #include "net_manager.h"
+#include "ethernet_init.h"
+#include "wifi_init.h"
+#include "esp_event.h"
 #include "esp_eth.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_ping.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/spi_master.h"
-#include "driver/gpio.h"
-#include "ethernet_init.h"
-#include "wifi_init.h"
-
+#include "ping/ping_sock.h"
+#include "lwip/inet.h"
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
 
 static const char *TAG = "NET_MANAGER";
 
-static net_mode_t s_current_mode = NET_MODE_ETHERNET;
-static net_mode_t s_last_mode = NET_MODE_ETHERNET;
-static esp_eth_handle_t s_eth_handle = NULL;
-static esp_eth_netif_glue_handle_t s_glue = NULL;
-static esp_netif_t *s_netif = NULL;
-static bool s_connected = false;
+/* ---- Durum Değişkenleri ---- */
+static net_mode_t s_current_mode = NET_MODE_AUTO;
+static bool s_wifi_connected = false;
 static bool s_eth_link_up = false;
-static bool s_eth_present = false;
+static bool s_event_loop_initialized = false;
+static bool s_manual_override = false;   // BLE manuel geçiş
+static net_mode_t s_manual_mode = NET_MODE_ETHERNET;
 
-/* Handle bildirimi */
-void net_manager_set_eth_handle(esp_eth_handle_t handle,
-                                esp_eth_netif_glue_handle_t glue,
-                                esp_netif_t *netif)
+/* ---- Yardımcı Fonksiyonlar ---- */
+static void stop_current_connection(void);
+static void start_network(void);
+static bool ping_test(void);
+static bool ethernet_available(void);
+
+/* -------------------------------------------------------
+ * Event Callback’ler
+ * ------------------------------------------------------- */
+void net_manager_on_wifi_event(bool connected)
 {
-    s_eth_handle = handle;
-    s_glue = glue;
-    s_netif = netif;
+    s_wifi_connected = connected;
+    ESP_LOGI(TAG, "Wi-Fi bağlantı durumu: %s", connected ? "UP" : "DOWN");
 }
 
-/* Kapatma fonksiyonu */
-static void stop_current_connection(void)
-{
-    if (s_eth_handle) {
-        ESP_LOGW(TAG, "Ethernet bağlantısı durduruluyor...");
-        esp_eth_stop(s_eth_handle);
-        esp_eth_del_netif_glue(s_glue);
-        s_glue = NULL;
-        esp_netif_destroy(s_netif);
-        s_netif = NULL;
-        esp_eth_driver_uninstall(s_eth_handle);
-        s_eth_handle = NULL;
-        spi_bus_free(SPI3_HOST);
-        gpio_set_level(PIN_RST, 0);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        gpio_set_level(PIN_RST, 1);
-        ESP_LOGW(TAG, "Ethernet bağlantısı tamamen durduruldu.");
-    }
-}
-
-/* Ethernet olay bildirimi */
 void net_manager_on_eth_event(bool link_up)
 {
     s_eth_link_up = link_up;
     ESP_LOGI(TAG, "Ethernet bağlantı durumu: %s", link_up ? "UP" : "DOWN");
 }
 
-/* Wi-Fi olay bildirimi */
-void net_manager_on_wifi_event(bool connected)
-{
-    s_connected = connected;
-    ESP_LOGI(TAG, "Wi-Fi bağlantı durumu: %s", connected ? "UP" : "DOWN");
-}
-
-/* Bağlantı durumu kontrolü */
-static bool net_manager_check_connection(void)
-{
-    if (s_current_mode == NET_MODE_ETHERNET)
-        return s_eth_link_up;
-    return s_connected;
-}
-
-/* Ethernet donanım kontrolü (basit tespit) */
-static bool check_w5500_presence(void)
-{
-    spi_device_handle_t spi;
-    spi_bus_config_t buscfg = {
-        .miso_io_num = PIN_MISO,
-        .mosi_io_num = PIN_MOSI,
-        .sclk_io_num = PIN_SCLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-    };
-    spi_device_interface_config_t devcfg = {
-        .mode = 0,
-        .clock_speed_hz = 1 * 1000 * 1000,
-        .spics_io_num = PIN_CS,
-        .queue_size = 1,
-    };
-
-    esp_err_t ret = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "SPI bus başlatılamadı, W5500 tespit atlanıyor.");
-        return false;
-    }
-
-    spi_bus_add_device(SPI3_HOST, &devcfg, &spi);
-
-    // W5500 Version Register = 0x0039
-    uint8_t tx[4] = {0x00, 0x39, 0x00, 0x00};
-    uint8_t rx[4] = {0};
-    spi_transaction_t t = {
-        .length = 32,
-        .tx_buffer = tx,
-        .rx_buffer = rx,
-    };
-    esp_err_t tr = spi_device_transmit(spi, &t);
-
-    spi_bus_remove_device(spi);
-    spi_bus_free(SPI3_HOST);
-
-    if (tr != ESP_OK) {
-        ESP_LOGW(TAG, "W5500 SPI iletişimi başarısız (%s)", esp_err_to_name(tr));
-        return false;
-    }
-
-    uint8_t version = rx[3];
-    if (version == 0x03 || version == 0x04) {
-        ESP_LOGI(TAG, "W5500 modülü tespit edildi (version=0x%02X).", version);
-        return true;
-    } else {
-        ESP_LOGW(TAG, "W5500 modülü tespit edilemedi (version=0x%02X).", version);
-        return false;
-    }
-}
-
-/* Modu değiştir */
+/* -------------------------------------------------------
+ * Manuel Mod (BLE’den gelen)
+ * ------------------------------------------------------- */
 void net_manager_set_mode(net_mode_t mode)
 {
-    s_last_mode = s_current_mode;
-    s_current_mode = mode;
+    s_manual_override = true;
+    s_manual_mode = mode;
+    ESP_LOGW(TAG, "BLE Manuel mod isteği: %d", mode);
 }
 
-/* Mod başlat */
-void net_manager_start(void)
+/* -------------------------------------------------------
+ * Event Loop kontrolü
+ * ------------------------------------------------------- */
+static void ensure_event_loop_initialized(void)
+{
+    if (!s_event_loop_initialized) {
+        ESP_ERROR_CHECK(esp_netif_init());
+        esp_err_t ret = esp_event_loop_create_default();
+        if (ret == ESP_ERR_INVALID_STATE)
+            ESP_LOGW(TAG, "Event loop zaten oluşturulmuş.");
+        else
+            ESP_ERROR_CHECK(ret);
+        s_event_loop_initialized = true;
+    }
+}
+
+/* -------------------------------------------------------
+ * Ethernet var mı kontrolü (SPI üzerinden)
+ * ------------------------------------------------------- */
+static bool ethernet_available(void)
+{
+    esp_err_t ret = start_w5500_ethernet();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Ethernet donanımı mevcut.");
+        stop_w5500_ethernet(); // sadece varlığını kontrol ettik
+        return true;
+    }
+    ESP_LOGW(TAG, "Ethernet donanımı bulunamadı!");
+    return false;
+}
+
+/* -------------------------------------------------------
+ * Ping testi
+ * ------------------------------------------------------- */
+static bool ping_test(void)
+{
+    ip_addr_t target_addr;
+    inet_pton(AF_INET, "8.8.8.8", &target_addr);
+
+    esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
+    ping_config.count = 3;
+    ping_config.target_addr = target_addr;
+
+    esp_ping_handle_t ping;
+    if (esp_ping_new_session(&ping_config, NULL, &ping) != ESP_OK)
+        return false;
+
+    esp_ping_start(ping);
+    uint32_t rx = 0;
+    bool success = false;
+
+    for (int i = 0; i < 3; i++) {
+        esp_ping_get_profile(ping, ESP_PING_PROF_REPLY, &rx, sizeof(rx));
+        if (rx > 0) { success = true; break; }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    esp_ping_stop(ping);
+    esp_ping_delete_session(ping);
+    return success;
+}
+
+/* -------------------------------------------------------
+ * Mevcut bağlantıyı durdur
+ * ------------------------------------------------------- */
+static void stop_current_connection(void)
 {
     switch (s_current_mode) {
     case NET_MODE_ETHERNET:
-        ESP_LOGI(TAG, "Ethernet başlatılıyor...");
+        ESP_LOGW(TAG, "Ethernet durduruluyor...");
+        stop_w5500_ethernet();
+        s_eth_link_up = false;
+        break;
 
-        // W5500 donanım kontrolü
-        s_eth_present = check_w5500_presence();
-        if (!s_eth_present) {
-            ESP_LOGW(TAG, "Ethernet donanımı bulunamadı, WiFi moduna geçiliyor...");
-            s_current_mode = NET_MODE_WIFI;
-            net_manager_start();
-            return;
-        }
+    case NET_MODE_WIFI:
+        ESP_LOGW(TAG, "Wi-Fi durduruluyor...");
+        stop_wifi_station();
+        s_wifi_connected = false;
+        break;
 
+    case NET_MODE_GSM:
+        ESP_LOGW(TAG, "GSM durduruluyor... (TODO)");
+        break;
+
+    default:
+        break;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(800));
+}
+
+/* -------------------------------------------------------
+ * Ağ başlatıcı
+ * ------------------------------------------------------- */
+static void start_network(void)
+{
+    ensure_event_loop_initialized();
+
+    switch (s_current_mode) {
+    case NET_MODE_ETHERNET:
+        ESP_LOGI(TAG, "[ETH] Ethernet başlatılıyor...");
         start_w5500_ethernet();
         break;
 
     case NET_MODE_WIFI:
-        ESP_LOGI(TAG, "WiFi başlatılıyor...");
+        ESP_LOGI(TAG, "[WIFI] Wi-Fi başlatılıyor...");
         start_wifi_station();
         break;
 
     case NET_MODE_GSM:
-        ESP_LOGI(TAG, "GSM başlatılıyor...");
-        // start_gsm(); // gelecek adım
+        ESP_LOGI(TAG, "[GSM] GSM başlatılıyor... (TODO)");
         break;
 
     default:
@@ -167,38 +173,115 @@ void net_manager_start(void)
     }
 }
 
-/* Otomatik ağ yönetimi görevi */
+/* -------------------------------------------------------
+ * Ana görev (failover + BLE override)
+ * ------------------------------------------------------- */
 static void net_manager_task(void *arg)
 {
-    while (1) {
-        if (!net_manager_check_connection()) {
-            ESP_LOGW(TAG, "Ağ bağlantısı yok, sonraki moda geçiliyor...");
-            stop_current_connection();
+    ESP_LOGI(TAG, "Ağ yönetim görevi başlatıldı.");
 
-            switch (s_current_mode) {
+    // Başlangıçta uygun modu seç
+    if (ethernet_available()) s_current_mode = NET_MODE_ETHERNET;
+    else s_current_mode = NET_MODE_WIFI;
+
+    start_network();
+
+    while (1)
+    {
+        /* ---- BLE Manuel geçiş varsa ---- */
+        if (s_manual_override) {
+            s_manual_override = false;
+            stop_current_connection();
+            s_current_mode = s_manual_mode;
+            ESP_LOGW(TAG, "BLE ile manuel olarak %d moduna geçiliyor.", s_current_mode);
+            start_network();
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+
+        bool connected = false;
+        bool ping_ok = false;
+
+        switch (s_current_mode) {
+            /* ---------------- AUTO ---------------- */
+            case NET_MODE_AUTO:
+                ESP_LOGI(TAG, "[AUTO] Otomatik mod: Ethernet var mı kontrol ediliyor...");
+                if (ethernet_available())
+                    s_current_mode = NET_MODE_ETHERNET;
+                else
+                    s_current_mode = NET_MODE_WIFI;
+                start_network();
+                break;
+
+            /* ---------------- Ethernet ---------------- */
             case NET_MODE_ETHERNET:
-                s_current_mode = NET_MODE_WIFI;
+                connected = s_eth_link_up;
+                if (!connected) {
+                    ESP_LOGW(TAG, "[ETH] Link DOWN → Wi-Fi’ye geçiliyor.");
+                    stop_current_connection();
+                    s_current_mode = NET_MODE_WIFI;
+                    start_network();
+                    break;
+                }
+
+                ping_ok = ping_test();
+                if (ping_ok) {
+                    ESP_LOGI(TAG, "[ETH] İnternet aktif, veri gönderilebilir.");
+                } else {
+                    ESP_LOGW(TAG, "[ETH] Ping başarısız → Wi-Fi’ye geçiliyor.");
+                    stop_current_connection();
+                    s_current_mode = NET_MODE_WIFI;
+                    start_network();
+                }
                 break;
+
+            /* ---------------- Wi-Fi ---------------- */
             case NET_MODE_WIFI:
-                s_current_mode = NET_MODE_GSM;
+                connected = wifi_is_connected();
+                if (!connected) {
+                    ESP_LOGW(TAG, "[WIFI] Bağlantı kurulamadı → GSM’e geçiliyor.");
+                    stop_current_connection();
+                    s_current_mode = NET_MODE_GSM;
+                    start_network();
+                    break;
+                }
+
+                ping_ok = ping_test();
+                if (ping_ok) {
+                    ESP_LOGI(TAG, "[WIFI] İnternet aktif, veri gönderilebilir.");
+                } else {
+                    ESP_LOGW(TAG, "[WIFI] Ping başarısız → GSM’e geçiliyor.");
+                    stop_current_connection();
+                    s_current_mode = NET_MODE_GSM;
+                    start_network();
+                }
                 break;
+
+            /* ---------------- GSM ---------------- */
             case NET_MODE_GSM:
-                s_current_mode = NET_MODE_ETHERNET;
-                break;
-            default:
-                s_current_mode = NET_MODE_ETHERNET;
+                // Burada gsm_internet_ok() gelecekte eklenecek.
+                ESP_LOGI(TAG, "[GSM] GSM kontrolü (şimdilik varsayılan başarısız).");
+                bool gsm_ok = false;
+                if (!gsm_ok) {
+                    ESP_LOGW(TAG, "[GSM] GSM başarısız → Ethernet’e geçiliyor.");
+                    stop_current_connection();
+                    s_current_mode = NET_MODE_ETHERNET;
+                    start_network();
+                } else {
+                    ESP_LOGI(TAG, "[GSM] İnternet aktif, veri gönderilebilir.");
+                }
                 break;
             }
 
-            ESP_LOGI(TAG, "Yeni mod: %d", s_current_mode);
-            net_manager_start();
+            vTaskDelay(pdMS_TO_TICKS(3000)); // 3 saniyede bir döngü
         }
-        vTaskDelay(pdMS_TO_TICKS(5000));  // 5 saniyede bir denetle
-    }
 }
 
-/* Görevi başlat */
+/* -------------------------------------------------------
+ * Görev oluşturucu
+ * ------------------------------------------------------- */
 void net_manager_create_task(void)
 {
-    xTaskCreate(net_manager_task, "net_manager_task", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(net_manager_task, "net_manager_task", 8192, NULL, 5, NULL, 1);
+    ESP_LOGI(TAG, "Ağ yöneticisi görevi oluşturuldu.");
 }
