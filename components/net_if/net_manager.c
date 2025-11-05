@@ -21,7 +21,7 @@ static net_mode_t s_current_mode = NET_MODE_AUTO;
 static bool s_wifi_connected = false;
 static bool s_eth_link_up = false;
 static bool s_event_loop_initialized = false;
-static bool s_manual_override = false;   // BLE manuel geçiş
+static bool s_manual_override = false;
 static net_mode_t s_manual_mode = NET_MODE_ETHERNET;
 
 /* ---- Yardımcı Fonksiyonlar ---- */
@@ -31,7 +31,7 @@ static bool ping_test(void);
 static bool ethernet_available(void);
 
 /* -------------------------------------------------------
- * Event Callback’ler
+ * Event Callback'ler
  * ------------------------------------------------------- */
 void net_manager_on_wifi_event(bool connected)
 {
@@ -46,7 +46,7 @@ void net_manager_on_eth_event(bool link_up)
 }
 
 /* -------------------------------------------------------
- * Manuel Mod (BLE’den gelen)
+ * Manuel Mod (BLE'den gelen)
  * ------------------------------------------------------- */
 void net_manager_set_mode(net_mode_t mode)
 {
@@ -79,7 +79,7 @@ static bool ethernet_available(void)
     esp_err_t ret = start_w5500_ethernet();
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Ethernet donanımı mevcut.");
-        stop_w5500_ethernet(); // sadece varlığını kontrol ettik
+        stop_w5500_ethernet();
         return true;
     }
     ESP_LOGW(TAG, "Ethernet donanımı bulunamadı!");
@@ -87,34 +87,42 @@ static bool ethernet_available(void)
 }
 
 /* -------------------------------------------------------
- * Ping testi
+ * Ping testi - GELİŞTİRİLMİŞ
  * ------------------------------------------------------- */
 static bool ping_test(void)
 {
+    ESP_LOGI(TAG, "Ping testi başlıyor (8.8.8.8)...");
+    
     ip_addr_t target_addr;
-    inet_pton(AF_INET, "8.8.8.8", &target_addr);
+    ipaddr_aton("8.8.8.8", &target_addr);
 
     esp_ping_config_t ping_config = ESP_PING_DEFAULT_CONFIG();
-    ping_config.count = 3;
     ping_config.target_addr = target_addr;
+    ping_config.count = 3;
+    ping_config.interval_ms = 1000;
+    ping_config.timeout_ms = 3000;
 
     esp_ping_handle_t ping;
-    if (esp_ping_new_session(&ping_config, NULL, &ping) != ESP_OK)
+    if (esp_ping_new_session(&ping_config, NULL, &ping) != ESP_OK) {
+        ESP_LOGE(TAG, "Ping oturumu oluşturulamadı!");
         return false;
-
-    esp_ping_start(ping);
-    uint32_t rx = 0;
-    bool success = false;
-
-    for (int i = 0; i < 3; i++) {
-        esp_ping_get_profile(ping, ESP_PING_PROF_REPLY, &rx, sizeof(rx));
-        if (rx > 0) { success = true; break; }
-        vTaskDelay(pdMS_TO_TICKS(500));
     }
 
+    esp_ping_start(ping);
+    
+    // Ping sonuçlarını bekle
+    vTaskDelay(pdMS_TO_TICKS(5000));  // 3 ping + buffer
+    
+    uint32_t transmitted = 0, received = 0;
+    esp_ping_get_profile(ping, ESP_PING_PROF_REQUEST, &transmitted, sizeof(transmitted));
+    esp_ping_get_profile(ping, ESP_PING_PROF_REPLY, &received, sizeof(received));
+    
     esp_ping_stop(ping);
     esp_ping_delete_session(ping);
-    return success;
+    
+    ESP_LOGI(TAG, "Ping sonucu: %d/%d paket alındı", received, transmitted);
+    
+    return (received > 0);
 }
 
 /* -------------------------------------------------------
@@ -143,7 +151,7 @@ static void stop_current_connection(void)
         break;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(800));
+    vTaskDelay(pdMS_TO_TICKS(1000));  // Durdurma için yeterli süre
 }
 
 /* -------------------------------------------------------
@@ -181,8 +189,11 @@ static void net_manager_task(void *arg)
     ESP_LOGI(TAG, "Ağ yönetim görevi başlatıldı.");
 
     // Başlangıçta uygun modu seç
-    if (ethernet_available()) s_current_mode = NET_MODE_ETHERNET;
-    else s_current_mode = NET_MODE_WIFI;
+    if (ethernet_available()) {
+        s_current_mode = NET_MODE_ETHERNET;
+    } else {
+        s_current_mode = NET_MODE_WIFI;
+    }
 
     start_network();
 
@@ -195,12 +206,9 @@ static void net_manager_task(void *arg)
             s_current_mode = s_manual_mode;
             ESP_LOGW(TAG, "BLE ile manuel olarak %d moduna geçiliyor.", s_current_mode);
             start_network();
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
-
-        bool connected = false;
-        bool ping_ok = false;
 
         switch (s_current_mode) {
             /* ---------------- AUTO ---------------- */
@@ -215,20 +223,21 @@ static void net_manager_task(void *arg)
 
             /* ---------------- Ethernet ---------------- */
             case NET_MODE_ETHERNET:
-                connected = s_eth_link_up;
-                if (!connected) {
-                    ESP_LOGW(TAG, "[ETH] Link DOWN → Wi-Fi’ye geçiliyor.");
+                if (!s_eth_link_up) {
+                    ESP_LOGW(TAG, "[ETH] Link DOWN → Wi-Fi'ye geçiliyor.");
                     stop_current_connection();
                     s_current_mode = NET_MODE_WIFI;
                     start_network();
                     break;
                 }
 
-                ping_ok = ping_test();
-                if (ping_ok) {
-                    ESP_LOGI(TAG, "[ETH] İnternet aktif, veri gönderilebilir.");
+                // ✅ Ethernet için ping testi
+                vTaskDelay(pdMS_TO_TICKS(2000));  // Link'in stabilize olması için bekle
+                
+                if (ping_test()) {
+                    ESP_LOGI(TAG, "[ETH] ✓ İnternet aktif, veri gönderilebilir.");
                 } else {
-                    ESP_LOGW(TAG, "[ETH] Ping başarısız → Wi-Fi’ye geçiliyor.");
+                    ESP_LOGW(TAG, "[ETH] ✗ Ping başarısız → Wi-Fi'ye geçiliyor.");
                     stop_current_connection();
                     s_current_mode = NET_MODE_WIFI;
                     start_network();
@@ -237,20 +246,33 @@ static void net_manager_task(void *arg)
 
             /* ---------------- Wi-Fi ---------------- */
             case NET_MODE_WIFI:
-                connected = wifi_is_connected();
-                if (!connected) {
-                    ESP_LOGW(TAG, "[WIFI] Bağlantı kurulamadı → GSM’e geçiliyor.");
+                ESP_LOGI(TAG, "[WIFI] Wi-Fi bağlantısı bekleniyor...");
+
+                // ✅ IP alınana kadar bekle (max 15 saniye)
+                int wait_count = 0;
+                while (!s_wifi_connected && wait_count < 30) {  // 30 x 500ms = 15 saniye
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    wait_count++;
+                }
+
+                if (!s_wifi_connected) {
+                    ESP_LOGW(TAG, "[WIFI] ✗ Wi-Fi bağlanamadı → GSM'e geçiliyor.");
                     stop_current_connection();
                     s_current_mode = NET_MODE_GSM;
                     start_network();
                     break;
                 }
 
-                ping_ok = ping_test();
-                if (ping_ok) {
-                    ESP_LOGI(TAG, "[WIFI] İnternet aktif, veri gönderilebilir.");
+                ESP_LOGI(TAG, "[WIFI] ✓ IP alındı, bağlantı kontrol ediliyor...");
+                
+                // ✅ Ağ stack'inin hazır olması için bekle
+                vTaskDelay(pdMS_TO_TICKS(3000));
+
+                // Ping testi
+                if (ping_test()) {
+                    ESP_LOGI(TAG, "[WIFI] ✓ İnternet aktif, veri gönderilebilir.");
                 } else {
-                    ESP_LOGW(TAG, "[WIFI] Ping başarısız → GSM’e geçiliyor.");
+                    ESP_LOGW(TAG, "[WIFI] ✗ Ping başarısız → GSM'e geçiliyor.");
                     stop_current_connection();
                     s_current_mode = NET_MODE_GSM;
                     start_network();
@@ -259,11 +281,11 @@ static void net_manager_task(void *arg)
 
             /* ---------------- GSM ---------------- */
             case NET_MODE_GSM:
-                // Burada gsm_internet_ok() gelecekte eklenecek.
                 ESP_LOGI(TAG, "[GSM] GSM kontrolü (şimdilik varsayılan başarısız).");
                 bool gsm_ok = false;
+                
                 if (!gsm_ok) {
-                    ESP_LOGW(TAG, "[GSM] GSM başarısız → Ethernet’e geçiliyor.");
+                    ESP_LOGW(TAG, "[GSM] GSM başarısız → Ethernet'e geçiliyor.");
                     stop_current_connection();
                     s_current_mode = NET_MODE_ETHERNET;
                     start_network();
@@ -271,10 +293,10 @@ static void net_manager_task(void *arg)
                     ESP_LOGI(TAG, "[GSM] İnternet aktif, veri gönderilebilir.");
                 }
                 break;
-            }
-
-            vTaskDelay(pdMS_TO_TICKS(3000)); // 3 saniyede bir döngü
         }
+
+        vTaskDelay(pdMS_TO_TICKS(10000)); // ✅ Her kontrol arasında 10 saniye bekle
+    }
 }
 
 /* -------------------------------------------------------

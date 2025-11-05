@@ -13,6 +13,7 @@ static const char *TAG = "WIFI_INIT";
 static bool s_wifi_connected = false;
 static bool wifi_initialized = false;
 static int s_wifi_fail_count = 0;
+esp_netif_t *wifi_netif_handle = NULL;
 
 /* ---------------- Olay işleyicisi ---------------- */
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -87,7 +88,8 @@ esp_err_t start_wifi_station(void)
     ESP_ERROR_CHECK(nvs_flash_init());
 
     /* Netif */
-    esp_netif_create_default_wifi_sta();
+    wifi_netif_handle = esp_netif_create_default_wifi_sta();
+
 
     /* Wi-Fi stack init */
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
