@@ -20,6 +20,7 @@ static const char *TAG = "NET_MANAGER";
 static net_mode_t s_current_mode = NET_MODE_AUTO;
 static bool s_wifi_connected = false;
 static bool s_eth_link_up = false;
+static bool s_eth_has_ip = false;  // ✅ Yeni: Ethernet IP aldı mı?
 static bool s_event_loop_initialized = false;
 static bool s_manual_override = false;
 static net_mode_t s_manual_mode = NET_MODE_ETHERNET;
@@ -29,6 +30,7 @@ static void stop_current_connection(void);
 static void start_network(void);
 static bool ping_test(void);
 static bool ethernet_available(void);
+static bool wait_for_ethernet_ip(int max_wait_sec);
 
 /* -------------------------------------------------------
  * Event Callback'ler
@@ -42,7 +44,20 @@ void net_manager_on_wifi_event(bool connected)
 void net_manager_on_eth_event(bool link_up)
 {
     s_eth_link_up = link_up;
+    
+    // ✅ Link düştüğünde IP durumunu sıfırla
+    if (!link_up) {
+        s_eth_has_ip = false;
+    }
+    
     ESP_LOGI(TAG, "Ethernet bağlantı durumu: %s", link_up ? "UP" : "DOWN");
+}
+
+/* ✅ Yeni: Ethernet IP aldığında çağrılacak */
+void net_manager_on_eth_got_ip(void)
+{
+    s_eth_has_ip = true;
+    ESP_LOGI(TAG, "✅ Ethernet IP alındı!");
 }
 
 /* -------------------------------------------------------
@@ -72,22 +87,44 @@ static void ensure_event_loop_initialized(void)
 }
 
 /* -------------------------------------------------------
- * Ethernet var mı kontrolü (SPI üzerinden)
+ * Ethernet var mı kontrolü
  * ------------------------------------------------------- */
 static bool ethernet_available(void)
 {
-    esp_err_t ret = start_w5500_ethernet();
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Ethernet donanımı mevcut.");
-        stop_w5500_ethernet();
-        return true;
-    }
-    ESP_LOGW(TAG, "Ethernet donanımı bulunamadı!");
-    return false;
+    return true;  // Manuel modda ethernet seçildiyse dene
 }
 
 /* -------------------------------------------------------
- * Ping testi - GELİŞTİRİLMİŞ
+ * ✅ Yeni: Ethernet IP bekle
+ * ------------------------------------------------------- */
+static bool wait_for_ethernet_ip(int max_wait_sec)
+{
+    ESP_LOGI(TAG, "Ethernet IP'si bekleniyor (max %d saniye)...", max_wait_sec);
+    
+    int wait_count = 0;
+    int max_attempts = max_wait_sec * 2;  // 500ms tick
+    
+    while (!s_eth_has_ip && wait_count < max_attempts) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        wait_count++;
+        
+        if (wait_count % 4 == 0) {  // Her 2 saniyede bir log
+            ESP_LOGI(TAG, "Ethernet IP bekliyor... (%d/%d)", 
+                     wait_count / 2, max_wait_sec);
+        }
+    }
+    
+    if (s_eth_has_ip) {
+        ESP_LOGI(TAG, "✅ Ethernet IP alındı!");
+        return true;
+    } else {
+        ESP_LOGW(TAG, "❌ Ethernet IP alınamadı (timeout: %d saniye)", max_wait_sec);
+        return false;
+    }
+}
+
+/* -------------------------------------------------------
+ * Ping testi
  * ------------------------------------------------------- */
 static bool ping_test(void)
 {
@@ -109,8 +146,6 @@ static bool ping_test(void)
     }
 
     esp_ping_start(ping);
-    
-    // Ping sonuçlarını bekle
     vTaskDelay(pdMS_TO_TICKS(5000));  // 3 ping + buffer
     
     uint32_t transmitted = 0, received = 0;
@@ -135,6 +170,7 @@ static void stop_current_connection(void)
         ESP_LOGW(TAG, "Ethernet durduruluyor...");
         stop_w5500_ethernet();
         s_eth_link_up = false;
+        s_eth_has_ip = false;  // ✅ IP durumunu sıfırla
         break;
 
     case NET_MODE_WIFI:
@@ -151,7 +187,7 @@ static void stop_current_connection(void)
         break;
     }
 
-    vTaskDelay(pdMS_TO_TICKS(1000));  // Durdurma için yeterli süre
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 /* -------------------------------------------------------
@@ -164,6 +200,7 @@ static void start_network(void)
     switch (s_current_mode) {
     case NET_MODE_ETHERNET:
         ESP_LOGI(TAG, "[ETH] Ethernet başlatılıyor...");
+        s_eth_has_ip = false;  // ✅ IP durumunu sıfırla
         start_w5500_ethernet();
         break;
 
@@ -223,6 +260,7 @@ static void net_manager_task(void *arg)
 
             /* ---------------- Ethernet ---------------- */
             case NET_MODE_ETHERNET:
+                // ✅ 1. Link kontrolü
                 if (!s_eth_link_up) {
                     ESP_LOGW(TAG, "[ETH] Link DOWN → Wi-Fi'ye geçiliyor.");
                     stop_current_connection();
@@ -231,13 +269,24 @@ static void net_manager_task(void *arg)
                     break;
                 }
 
-                // ✅ Ethernet için ping testi
-                vTaskDelay(pdMS_TO_TICKS(2000));  // Link'in stabilize olması için bekle
+                ESP_LOGI(TAG, "[ETH] Link UP, IP bekleniyor...");
+                
+                // ✅ 2. IP almayı bekle (max 15 saniye)
+                if (!wait_for_ethernet_ip(15)) {
+                    ESP_LOGW(TAG, "[ETH] ❌ IP alınamadı → Wi-Fi'ye geçiliyor.");
+                    stop_current_connection();
+                    s_current_mode = NET_MODE_WIFI;
+                    start_network();
+                    break;
+                }
+
+                // ✅ 3. IP alındı, şimdi ping test et
+                vTaskDelay(pdMS_TO_TICKS(2000));  // Network stack stabilize olsun
                 
                 if (ping_test()) {
-                    ESP_LOGI(TAG, "[ETH] ✓ İnternet aktif, veri gönderilebilir.");
+                    ESP_LOGI(TAG, "[ETH] ✅ İnternet aktif, veri gönderilebilir.");
                 } else {
-                    ESP_LOGW(TAG, "[ETH] ✗ Ping başarısız → Wi-Fi'ye geçiliyor.");
+                    ESP_LOGW(TAG, "[ETH] ❌ Ping başarısız → Wi-Fi'ye geçiliyor.");
                     stop_current_connection();
                     s_current_mode = NET_MODE_WIFI;
                     start_network();
@@ -250,29 +299,26 @@ static void net_manager_task(void *arg)
 
                 // ✅ IP alınana kadar bekle (max 15 saniye)
                 int wait_count = 0;
-                while (!s_wifi_connected && wait_count < 30) {  // 30 x 500ms = 15 saniye
+                while (!s_wifi_connected && wait_count < 30) {
                     vTaskDelay(pdMS_TO_TICKS(500));
                     wait_count++;
                 }
 
                 if (!s_wifi_connected) {
-                    ESP_LOGW(TAG, "[WIFI] ✗ Wi-Fi bağlanamadı → GSM'e geçiliyor.");
+                    ESP_LOGW(TAG, "[WIFI] ❌ Wi-Fi bağlanamadı → GSM'e geçiliyor.");
                     stop_current_connection();
                     s_current_mode = NET_MODE_GSM;
                     start_network();
                     break;
                 }
 
-                ESP_LOGI(TAG, "[WIFI] ✓ IP alındı, bağlantı kontrol ediliyor...");
-                
-                // ✅ Ağ stack'inin hazır olması için bekle
+                ESP_LOGI(TAG, "[WIFI] ✅ IP alındı, bağlantı kontrol ediliyor...");
                 vTaskDelay(pdMS_TO_TICKS(3000));
 
-                // Ping testi
                 if (ping_test()) {
-                    ESP_LOGI(TAG, "[WIFI] ✓ İnternet aktif, veri gönderilebilir.");
+                    ESP_LOGI(TAG, "[WIFI] ✅ İnternet aktif, veri gönderilebilir.");
                 } else {
-                    ESP_LOGW(TAG, "[WIFI] ✗ Ping başarısız → GSM'e geçiliyor.");
+                    ESP_LOGW(TAG, "[WIFI] ❌ Ping başarısız → GSM'e geçiliyor.");
                     stop_current_connection();
                     s_current_mode = NET_MODE_GSM;
                     start_network();
@@ -295,7 +341,7 @@ static void net_manager_task(void *arg)
                 break;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10000)); // ✅ Her kontrol arasında 10 saniye bekle
+        vTaskDelay(pdMS_TO_TICKS(10000)); // Her kontrol arasında 10 saniye bekle
     }
 }
 

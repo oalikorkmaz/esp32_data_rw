@@ -10,3 +10,10 @@ esp_err_t storage_init(void) {
     
     return ESP_OK;
 }
+
+esp_err_t storage_write_data(const char *timestamp, float avg)
+{
+    char line[64];
+    snprintf(line, sizeof(line), "%s, %.2f\n", timestamp, avg);
+    return storage_write_file("/data.csv", line, strlen(line), true);
+}

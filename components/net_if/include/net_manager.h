@@ -20,6 +20,9 @@ void net_manager_create_task(void);
 void net_manager_on_eth_event(bool link_up);
 void net_manager_on_wifi_event(bool connected);
 bool net_manager_is_internet_ok(void);
+bool net_manager_is_connected(void);
+void net_manager_on_eth_got_ip(void);
+
 
 
 

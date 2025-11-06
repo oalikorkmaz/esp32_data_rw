@@ -4,16 +4,17 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "driver/gpio.h"
+#include "nvs_flash.h"
 // Tüm bileşen arayüzlerini dahil et
 #include "cfg_if.h"
 #include "storage_if.h"
 #include "time_if.h"
-#include "parser_hex.h"
+#include "data_parser.h"
 #include "ble_system_if.h"
-#include "nvs_flash.h"
 #include "include/state_machine.h"
 #include "ethernet_init.h"
 #include "net_manager.h"
+#include "serial_if.h"
 
 
 static const char *TAG = "APP_MAIN";
@@ -40,6 +41,9 @@ void comm_manager_task(void *pvParameters) {
 void app_main(void) {
     ESP_LOGI(TAG, "--- Sistem Başlatılıyor: Donanım/Yazılım Init Evresi ---");
 
+    cfg_init();
+    const device_cfg_t *cfg = cfg_get();
+    ESP_LOGI("MAIN", "Cihaz ID: %s", cfg->device_id);
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(ble_system_init());
     net_manager_set_mode(NET_MODE_ETHERNET);  // Varsayılan Ethernet

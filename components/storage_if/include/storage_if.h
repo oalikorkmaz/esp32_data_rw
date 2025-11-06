@@ -40,6 +40,8 @@ esp_err_t storage_write_file(const char *path, const void *data_buffer, size_t l
 int storage_read_file(const char *path, void *read_buffer, size_t max_len);
 
 // Diğer SD kart/depolama fonksiyonları buraya eklenebilir.
+esp_err_t storage_write_data(const char *timestamp, float avg);
+
 
 #ifdef __cplusplus
 }

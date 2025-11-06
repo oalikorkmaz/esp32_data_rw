@@ -8,186 +8,189 @@
 #include "esp_log.h"
 #include "net_manager.h"
 
-/* net_eth_service.c içindeki servisleri dahil et */
 extern esp_err_t register_eth_service(void);
-extern void eth_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data);
+extern void set_eth_handle(esp_eth_handle_t handle,
+                           esp_eth_netif_glue_handle_t glue,
+                           esp_netif_t *netif);
 
 /* ---------------------------------------------------- */
-/* Donanım konfigürasyon tanımları - senin proje pinlerine göre ayarla */
+/* Donanım pinleri */
 #define PIN_MISO  13
 #define PIN_MOSI  11
 #define PIN_SCLK  12
 #define PIN_CS    10
 #define PIN_RST   8
-#define PIN_INT   9
+#define PIN_INT   9      // Eski sürümde aktifti
 #define SPI_HOST  SPI3_HOST
-#define SPI_CLOCK_MHZ 8
+#define SPI_CLOCK_MHZ 8  // Eski sürümde 8 MHz idi
 /* ---------------------------------------------------- */
-extern void set_eth_handle(esp_eth_handle_t handle,
-                           esp_eth_netif_glue_handle_t glue,
-                           esp_netif_t *netif);
-
 
 static const char *TAG = "ETH_INIT";
 
-/* Global handle’lar (durdurma fonksiyonu için erişilebilir) */
+/* Global değişkenler */
 static esp_eth_handle_t s_eth_handle = NULL;
 static esp_eth_netif_glue_handle_t s_glue = NULL;
 static esp_netif_t *s_netif = NULL;
+static bool s_eth_running = false;
 
 /* ---------------------------------------------------- */
-/* W5500 donanım tespiti için basit SPI okuma */
-static bool w5500_is_present(void)
+/* SPI Bus başlatma */
+static esp_err_t init_spi_bus(void)
 {
-    spi_device_handle_t spi;
     spi_bus_config_t buscfg = {
         .miso_io_num = PIN_MISO,
         .mosi_io_num = PIN_MOSI,
         .sclk_io_num = PIN_SCLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-    };
-    spi_device_interface_config_t devcfg = {
-        .mode = 0,
-        .clock_speed_hz = 1 * 1000 * 1000,  // düşük hızla test
-        .spics_io_num = PIN_CS,
-        .queue_size = 1,
     };
 
     esp_err_t ret = spi_bus_initialize(SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
     if (ret == ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "SPI bus zaten başlatılmış (test modu).");
-    } else if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SPI bus başlatılamadı (0x%x)", ret);
-        return false;
+        ESP_LOGW(TAG, "SPI zaten başlatılmış.");
+        return ESP_OK;
     }
-
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI_HOST, &devcfg, &spi));
-
-    // W5500 Version Register adresi = 0x0039
-    uint8_t tx[4] = {0x00, 0x39, 0x00, 0x00};
-    uint8_t rx[4] = {0};
-
-    spi_transaction_t t = {
-        .length = 32,
-        .tx_buffer = tx,
-        .rx_buffer = rx,
-    };
-    esp_err_t tr = spi_device_transmit(spi, &t);
-
-    spi_bus_remove_device(spi);
-    spi_bus_free(SPI_HOST);
-
-    if (tr != ESP_OK) {
-        ESP_LOGW(TAG, "SPI iletişimi başarısız (%s)", esp_err_to_name(tr));
-        return false;
-    }
-
-    uint8_t version = rx[3];
-    ESP_LOGI(TAG, "W5500 versiyon kaydı: 0x%02X", version);
-    return (version == 0x03 || version == 0x04);
+    ESP_ERROR_CHECK(ret);
+    ESP_LOGI(TAG, "SPI bus başlatıldı.");
+    return ESP_OK;
 }
 
 /* ---------------------------------------------------- */
-/* Ethernet Başlatma */
-esp_err_t start_w5500_ethernet(void)
+/* Donanım reset */
+static void w5500_hardware_reset(void)
 {
-    ESP_LOGI(TAG, "Ethernet başlatılıyor...");
-
-    // 1️⃣ Donanım tespiti
-    if (!w5500_is_present()) {
-        ESP_LOGW(TAG, "W5500 modülü algılanamadı. Ethernet pasif hale getirildi.");
-        net_manager_on_eth_event(false);
-        return ESP_ERR_NOT_FOUND;
-    }
-    ESP_LOGI(TAG, "W5500 modülü algılandı.");
-
-    // 2️⃣ Event Loop
-    ESP_ERROR_CHECK(esp_netif_init());
-    esp_err_t ret = esp_event_loop_create_default();
-    if (ret == ESP_ERR_INVALID_STATE)
-        ESP_LOGW(TAG, "Event loop zaten oluşturulmuş, atlanıyor.");
-    else
-        ESP_ERROR_CHECK(ret);
-
-    // 3️⃣ SPI Bus yapılandırması
-    spi_bus_config_t buscfg = {
-        .miso_io_num = PIN_MISO,
-        .mosi_io_num = PIN_MOSI,
-        .sclk_io_num = PIN_SCLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
+    gpio_config_t rst_conf = {
+        .pin_bit_mask = 1ULL << PIN_RST,
+        .mode = GPIO_MODE_OUTPUT,
     };
-    esp_err_t ret1 = spi_bus_initialize(SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret1 == ESP_ERR_INVALID_STATE)
-        ESP_LOGW(TAG, "SPI bus zaten başlatılmış, atlanıyor.");
-    else
-        ESP_ERROR_CHECK(ret1);
-
-    // 4️⃣ Reset pini ayarla
-    gpio_config_t rst_conf = {.pin_bit_mask = 1ULL << PIN_RST, .mode = GPIO_MODE_OUTPUT};
     gpio_config(&rst_conf);
+
     gpio_set_level(PIN_RST, 0);
     vTaskDelay(pdMS_TO_TICKS(100));
     gpio_set_level(PIN_RST, 1);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // 5️⃣ Netif oluştur
+    ESP_LOGI(TAG, "W5500 reset tamamlandı.");
+}
+
+/* ---------------------------------------------------- */
+/* Ethernet başlatma */
+esp_err_t start_w5500_ethernet(void)
+{
+    if (s_eth_running) {
+        ESP_LOGW(TAG, "Ethernet zaten çalışıyor!");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Ethernet başlatılıyor...");
+
+    // 1️⃣ Ağ sistemlerini başlat (zaten varsa hata verme)
+    esp_err_t ret = esp_netif_init();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(ret);
+    }
+
+    ret = esp_event_loop_create_default();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_ERROR_CHECK(ret);
+    }
+
+    // 2️⃣ SPI başlat
+    ESP_ERROR_CHECK(init_spi_bus());
+
+    // ⚙️ ISR servisi kurulmadıysa kur
+    if (gpio_install_isr_service(0) != ESP_OK) {
+        ESP_LOGW(TAG, "GPIO ISR servisi zaten kurulu.");
+    }
+
+    // 3️⃣ Donanım reset
+    w5500_hardware_reset();
+
+    // 4️⃣ Netif oluştur
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
     s_netif = esp_netif_new(&cfg);
+    if (!s_netif) {
+        ESP_LOGE(TAG, "Netif oluşturulamadı!");
+        return ESP_FAIL;
+    }
 
-    // 6️⃣ SPI device yapılandırması
-    spi_device_interface_config_t devcfg = {
+    // 5️⃣ SPI ayarları
+    spi_device_interface_config_t spi_devcfg = {
         .mode = 0,
         .clock_speed_hz = SPI_CLOCK_MHZ * 1000 * 1000,
         .spics_io_num = PIN_CS,
         .queue_size = 20,
+        // ❌ Burada command_bits/address_bits TANIMLANMAMALI!
     };
 
-    // 7️⃣ MAC & PHY
+    // 6️⃣ W5500 config
+    eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(SPI_HOST, &spi_devcfg);
+    w5500_config.int_gpio_num = PIN_INT;  // aktif interrupt pini
+
+    // 7️⃣ MAC & PHY config
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
-    phy_config.phy_addr = 1;
-    phy_config.reset_gpio_num = PIN_RST;
+    phy_config.phy_addr = 1;              // eski sürümde sabitti
+    phy_config.reset_gpio_num = PIN_RST;  // donanım reset pini aktif
 
-    eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(SPI_HOST, &devcfg);
-    w5500_config.int_gpio_num = PIN_INT;
-
+    // 8️⃣ MAC & PHY oluştur
     esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
     esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
+    if (!mac || !phy) {
+        ESP_LOGE(TAG, "MAC/PHY oluşturulamadı!");
+        if (s_netif) esp_netif_destroy(s_netif);
+        s_netif = NULL;
+        return ESP_FAIL;
+    }
 
-    // 8️⃣ Sürücü kurulumu
+    // 9️⃣ Ethernet driver kurulumu
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac, phy);
-    ESP_ERROR_CHECK(esp_eth_driver_install(&eth_config, &s_eth_handle));
+    esp_err_t ret1 = esp_eth_driver_install(&eth_config, &s_eth_handle);
+    if (ret1 != ESP_OK) {
+        ESP_LOGE(TAG, "Ethernet driver kurulamadı: %s", esp_err_to_name(ret1));
+        if (s_netif) esp_netif_destroy(s_netif);
+        s_netif = NULL;
+        return ret1;
+    }
 
+    // 🔟 MAC adresi ayarla
     uint8_t mac_addr[6] = {0x02, 0x00, 0x00, 0x12, 0x34, 0x56};
     ESP_ERROR_CHECK(esp_eth_ioctl(s_eth_handle, ETH_CMD_S_MAC_ADDR, mac_addr));
 
-    // 9️⃣ Netif bağla
+    // 1️⃣1️⃣ Netif'e bağla
     s_glue = esp_eth_new_netif_glue(s_eth_handle);
     ESP_ERROR_CHECK(esp_netif_attach(s_netif, s_glue));
 
-    //  🔟 Servisleri ve handler’ı bağla
+    // 1️⃣2️⃣ Event servisleri kaydet
     ESP_ERROR_CHECK(register_eth_service());
     set_eth_handle(s_eth_handle, s_glue, s_netif);
 
-    // DHCP ve sürücü başlat
+    // 1️⃣3️⃣ DHCP & Başlat
     ESP_ERROR_CHECK(esp_netif_dhcpc_start(s_netif));
     ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
 
-    ESP_LOGI(TAG, "Ethernet başlatıldı, IP bekleniyor...");
+    s_eth_running = true;
+    ESP_LOGI(TAG, "✓ Ethernet başlatıldı, IP bekleniyor...");
+
     return ESP_OK;
 }
 
 /* ---------------------------------------------------- */
-/* Ethernet Durdurma */
+/* Ethernet durdurma */
 void stop_w5500_ethernet(void)
 {
+    if (!s_eth_running) {
+        ESP_LOGD(TAG, "Ethernet zaten durdurulmuş.");
+        return;
+    }
+
     ESP_LOGW(TAG, "Ethernet durduruluyor...");
 
     if (s_eth_handle) {
         esp_eth_stop(s_eth_handle);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        esp_eth_driver_uninstall(s_eth_handle);
+        s_eth_handle = NULL;
     }
 
     if (s_glue) {
@@ -200,15 +203,16 @@ void stop_w5500_ethernet(void)
         s_netif = NULL;
     }
 
-    if (s_eth_handle) {
-        esp_eth_driver_uninstall(s_eth_handle);
-        s_eth_handle = NULL;
-    }
-
-    spi_bus_free(SPI_HOST);
     gpio_set_level(PIN_RST, 0);
     vTaskDelay(pdMS_TO_TICKS(100));
-    gpio_set_level(PIN_RST, 1);
 
-    ESP_LOGI(TAG, "Ethernet tamamen durduruldu.");
+    s_eth_running = false;
+    ESP_LOGI(TAG, "✓ Ethernet tamamen durduruldu.");
+}
+
+/* ---------------------------------------------------- */
+/* Durum sorgulama */
+bool is_ethernet_running(void)
+{
+    return s_eth_running;
 }
