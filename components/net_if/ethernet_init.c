@@ -7,6 +7,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "net_manager.h"
+#include "spi_if.h"
 
 extern esp_err_t register_eth_service(void);
 extern void set_eth_handle(esp_eth_handle_t handle,
@@ -20,9 +21,9 @@ extern void set_eth_handle(esp_eth_handle_t handle,
 #define PIN_SCLK  12
 #define PIN_CS    10
 #define PIN_RST   8
-#define PIN_INT   9      // Eski sürümde aktifti
+#define PIN_INT   9
 #define SPI_HOST  SPI3_HOST
-#define SPI_CLOCK_MHZ 8  // Eski sürümde 8 MHz idi
+#define SPI_CLOCK_MHZ 8
 /* ---------------------------------------------------- */
 
 static const char *TAG = "ETH_INIT";
@@ -35,7 +36,7 @@ static bool s_eth_running = false;
 
 /* ---------------------------------------------------- */
 /* SPI Bus başlatma */
-static esp_err_t init_spi_bus(void)
+esp_err_t ethernet_spi_init(void)
 {
     spi_bus_config_t buscfg = {
         .miso_io_num = PIN_MISO,
@@ -44,15 +45,7 @@ static esp_err_t init_spi_bus(void)
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
     };
-
-    esp_err_t ret = spi_bus_initialize(SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
-    if (ret == ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "SPI zaten başlatılmış.");
-        return ESP_OK;
-    }
-    ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "SPI bus başlatıldı.");
-    return ESP_OK;
+    return spi_if_init(SPI_HOST, &buscfg);
 }
 
 /* ---------------------------------------------------- */
@@ -96,7 +89,7 @@ esp_err_t start_w5500_ethernet(void)
     }
 
     // 2️⃣ SPI başlat
-    ESP_ERROR_CHECK(init_spi_bus());
+    ESP_ERROR_CHECK(ethernet_spi_init());
 
     // ⚙️ ISR servisi kurulmadıysa kur
     if (gpio_install_isr_service(0) != ESP_OK) {
@@ -120,7 +113,7 @@ esp_err_t start_w5500_ethernet(void)
         .clock_speed_hz = SPI_CLOCK_MHZ * 1000 * 1000,
         .spics_io_num = PIN_CS,
         .queue_size = 20,
-        // ❌ Burada command_bits/address_bits TANIMLANMAMALI!
+        // Burada command_bits/address_bits TANIMLANMAMALI!
     };
 
     // 6️⃣ W5500 config

@@ -4,4 +4,5 @@ idf_component_register(SRCS
                             "ethernet_init.c"
                             "net_manager.c"
                        INCLUDE_DIRS "include"
-                       REQUIRES esp_event esp_netif esp_eth driver esp_wifi nvs_flash)
+                       REQUIRES esp_event esp_netif esp_eth driver esp_wifi nvs_flash spi_if
+                       )

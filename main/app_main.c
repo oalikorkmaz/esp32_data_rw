@@ -40,43 +40,33 @@ void comm_manager_task(void *pvParameters) {
 }
 void app_main(void) {
     ESP_LOGI(TAG, "--- Sistem Başlatılıyor: Donanım/Yazılım Init Evresi ---");
-
+    
+    /* 1. Kalıcı Hafıza */
     cfg_init();
     const device_cfg_t *cfg = cfg_get();
     ESP_LOGI("MAIN", "Cihaz ID: %s", cfg->device_id);
+
+    /* 2. Temel Donanımlar */
+    ESP_ERROR_CHECK(time_init());              // RTC veya SNTP
+    ESP_ERROR_CHECK(storage_init());           // SD kart / SPIFFS
+    ESP_LOGI(TAG, "SD Kart veya dosya sistemi hazır.");
+    
+    /* 3. Haberleşme Katmanı */
     ESP_ERROR_CHECK(nvs_flash_init());
-    ESP_ERROR_CHECK(ble_system_init());
     net_manager_set_mode(NET_MODE_ETHERNET);  // Varsayılan Ethernet
     net_manager_create_task();
 
-    // 1. Temel Tek Seferlik Başlatmalar
-    //ESP_ERROR_CHECK(cfg_init());       // NVS
-    //ESP_ERROR_CHECK(storage_init());   // SD/SPIFFS
-    //ESP_ERROR_CHECK(net_init());       // Ağ Yığını
-    //ESP_ERROR_CHECK(time_init());      // RTC/SNTP
-    //ESP_ERROR_CHECK(parser_init());    // Veri İşleyici init
-    
-    // 2. Etkileşimli Servisler
-    // Bluetooth başlatma ve reklam ayarları bu fonksiyonun içinde.
-    
-    ESP_LOGI(TAG, "--- Tüm Temel Bileşenler Başlatıldı. Görev Oluşturma Başlıyor ---");
+    /* 4. BLE / Seri / Parser */
+    ESP_ERROR_CHECK(ble_system_init());
+    serial_init();
 
-    // 3. FreeRTOS Görevlerinin Oluşturulması
-    // ESP_ERROR_CHECK(state_machine_init());
+    /* 5. Uygulama Servisleri ve Durum Makinesi */
+    ESP_ERROR_CHECK(state_machine_init());
+
     
-    // xTaskCreate(data_collector_task, 
-    //             "DATA_COLL", 
-    //             4096, 
-    //             NULL, 
-    //             configMAX_PRIORITIES - 3, 
-    //             NULL);
-    
-    // xTaskCreate(comm_manager_task, 
-    //             "COMM_MGR", 
-    //             6144, 
-    //             NULL, 
-    //             configMAX_PRIORITIES - 4, 
-    //             NULL);
-    
-    ESP_LOGI(TAG, "--- FreeRTOS Görevleri Başarıyla Oluşturuldu. Sistem Hazır. ---");
+    /* 6. FreeRTOS Görevleri */
+    xTaskCreate(data_collector_task, "DATA_COLL", 4096, NULL, 5, NULL);
+    xTaskCreate(comm_manager_task, "COMM_MGR", 6144, NULL, 4, NULL);
+
+    ESP_LOGI(TAG, "--- Sistem Başlatıldı ve Görevler Çalışıyor ---");
 }
