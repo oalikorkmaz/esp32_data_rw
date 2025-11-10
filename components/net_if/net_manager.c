@@ -218,6 +218,30 @@ static void start_network(void)
     }
 }
 
+
+
+bool net_manager_is_connected(void)
+{
+    // ETHERNET: hem link UP hem de IP alınmış olmalı
+    bool eth_ok  = s_eth_link_up && s_eth_has_ip;
+    // WIFI: sen zaten s_wifi_connected'i IP alındıktan sonra true yapıyorsun
+    bool wifi_ok = s_wifi_connected;
+    // GSM: ileride gerçek durumu bağlayacaksın; şimdilik false
+    bool gsm_ok  = false;
+
+    switch (s_current_mode) {
+        case NET_MODE_ETHERNET: return eth_ok;
+        case NET_MODE_WIFI:     return wifi_ok;
+        case NET_MODE_GSM:      return gsm_ok;
+        case NET_MODE_AUTO:
+        default:
+            // AUTO’da hangisi aktifse/çalışıyorsa true kabul et
+            return (eth_ok || wifi_ok || gsm_ok);
+    }
+}
+
+
+
 /* -------------------------------------------------------
  * Ana görev (failover + BLE override)
  * ------------------------------------------------------- */

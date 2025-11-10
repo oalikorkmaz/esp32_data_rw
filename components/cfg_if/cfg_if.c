@@ -20,7 +20,7 @@ static void generate_device_id(char *device_id, size_t max_len)
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     
     // Format: ESP32-AABBCCDD (son 4 byte MAC adresi)
-    snprintf(device_id, max_len, "ESP32-%02X%02X%02X%02X",
+    snprintf(device_id, max_len, "%02X-%02X-%02X-%02X",
              mac[2], mac[3], mac[4], mac[5]);
     
     ESP_LOGI(TAG, "Üretilen Device ID: %s", device_id);
@@ -52,7 +52,7 @@ static void load_factory_defaults(void)
     
     ESP_LOGI(TAG, "Fabrika varsayılanları yüklendi.");
 }
-
+ 
 /* -------------------------------------------------------
  * Konfigürasyon Doğrulama
  * ------------------------------------------------------- */

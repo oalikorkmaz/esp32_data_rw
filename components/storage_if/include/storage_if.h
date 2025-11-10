@@ -67,6 +67,11 @@ esp_err_t storage_write_data(const char *timestamp, float avg);
 esp_err_t storage_write_sensor_data(const char *timestamp, const char *label, 
                                      float value, const char *unit);
 
+
+esp_err_t storage_prepare_paths_manual(int year, int month, int day, int hour,
+                                       char *out_date_dir, size_t out_date_dir_cap,
+                                       char *out_hour_file, size_t out_hour_file_cap);
+
 /**
  * @brief SD Kart mount edilmiş mi kontrol eder.
  * @return true SD Kart hazır, false SD Kart yok.
