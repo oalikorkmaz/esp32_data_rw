@@ -18,7 +18,7 @@
 #define SERIAL_UART_PORT_NUMBER            (UART_NUM_1)
 #define SERIAL_UART_TX_GPIO_NUMBER         (17)
 #define SERIAL_UART_RX_GPIO_NUMBER         (16)
-#define SERIAL_UART_BAUD_RATE              (9600)
+#define SERIAL_UART_BAUD_RATE              (1150200)
 
 /* UART sürücüsünün dahili RX buffer'ı (bayt) */
 #define SERIAL_UART_DRIVER_RX_BUFFER_BYTES (2048)

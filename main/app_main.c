@@ -53,9 +53,17 @@ static void test_manual_send_task(void *arg)
 
     // Elle kanal sayısı ve değerleri
     record.sensor_count = 10;
-    record.sensors[0] = 12.34;
-    record.sensors[1] = 56.78;
-    record.sensors[2] = 90.12;
+    record.sensors[0] = 11.23;
+    record.sensors[1] = 45.67;
+    record.sensors[2] = 89.01;
+    record.sensors[3] = 23.45;
+    record.sensors[4] = 78.90;
+    record.sensors[5] = 11.22;
+    record.sensors[6] = 33.44;
+    record.sensors[7] = 55.66;
+    record.sensors[8] = 77.88;
+    record.sensors[9] = 99.00;
+
 
     // Zamanı elle verelim
     const char *manual_timestamp = "11/11/05-14:52:56";

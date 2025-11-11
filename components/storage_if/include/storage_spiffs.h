@@ -36,6 +36,19 @@ esp_err_t storage_deinit(void);
  * @return esp_err_t ESP_OK veya hata kodu.
  */
 esp_err_t storage_write_file(const char *path, const void *data_buffer, size_t len, bool append);
+/**
+ * @brief Cihaz kimliği ve tarih-saat bilgisine göre otomatik dosya oluşturur ve frame verisini SD karta yazar.
+ *
+ * Kayıt yapısı şu şekildedir:
+ * /sdcard/<device_id>/<YYYY>/<MM>/<DD>/<HH>-<MM>-<SS>.log
+ *
+ * Örnek:
+ * /sdcard/00-08-DC-20-00-59/2025/11/11/16-52-56.log
+ *
+ * @param frame Yazılacak telemetri verisi (örnek: "$device_id$timestamp$values$")
+ * @return esp_err_t ESP_OK (başarılı) veya hata kodu (örneğin ESP_FAIL, ESP_ERR_INVALID_STATE)
+ */
+esp_err_t storage_write_frame(const char *frame);
 
 /**
  * @brief Belirtilen dosya yolundan veri okur.

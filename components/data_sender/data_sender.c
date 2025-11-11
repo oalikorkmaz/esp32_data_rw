@@ -138,35 +138,8 @@ static bool data_sender_send_to_server(const char *frame)
  * ========================================================== */
 static bool data_sender_save_to_sd(const char *frame)
 {
-    if (!frame || !storage_is_available()) {
-        ESP_LOGW(TAG, "SD not available");
-        return false;
-    }
-
-    char date_str[16], time_str[16];
-    time_if_get_date(date_str, sizeof(date_str));
-    time_if_get_time(time_str, sizeof(time_str));
-
-    int day, month, year, hour, minute, second;
-    sscanf(date_str, "%2d/%2d/%4d", &day, &month, &year);
-    sscanf(time_str, "%2d:%2d:%2d", &hour, &minute, &second);
-
-    char dir_path[128], file_path[128];
-    if (storage_prepare_paths_manual(year, month, day, hour,
-                                     dir_path, sizeof(dir_path),
-                                     file_path, sizeof(file_path)) != ESP_OK)
-        return false;
-
-    FILE *f = fopen(file_path, "a");
-    if (!f) {
-        ESP_LOGE(TAG, "File open failed: %s", file_path);
-        return false;
-    }
-
-    fwrite(frame, 1, strlen(frame), f);
-    fclose(f);
-    ESP_LOGI(TAG, "Frame saved to SD: %s", file_path);
-    return true;
+    esp_err_t res = storage_write_frame(frame);
+    return (res == ESP_OK);
 }
 
 /* ==========================================================

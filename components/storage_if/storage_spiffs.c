@@ -6,6 +6,8 @@
 #include "sdmmc_cmd.h"
 #include "driver/spi_common.h"
 #include "spi_if.h"
+#include "cfg_if.h"
+#include "time_if.h"
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -63,58 +65,6 @@ static esp_err_t create_directory_if_not_exists(const char *path)
     }
 
     ESP_LOGI(TAG, "✅ Klasör oluşturuldu: %s", path);
-    return ESP_OK;
-}
-
-// Elle verilen yıl/ay/gün/saat ile hiyerarşiyi oluştur ve "<dir>/<HH>.log" döndür
-esp_err_t storage_prepare_paths_manual(int year, int month, int day, int hour,
-                                       char *out_date_dir, size_t out_date_dir_cap,
-                                       char *out_hour_file, size_t out_hour_file_cap)
-{
-    if (!s_sd_mounted) {
-        ESP_LOGW(TAG, "SD kart yok (mount edilmemiş)."); // internete devam edeceğiz
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    char year_path[128], month_path[128], day_path[128];
-
-    // /sdcard/YYYY
-    strlcpy(year_path, SD_MOUNT_POINT, sizeof(year_path));
-    strlcat(year_path, "/", sizeof(year_path));
-    char ybuf[8]; snprintf(ybuf, sizeof(ybuf), "%04d", year);
-    strlcat(year_path, ybuf, sizeof(year_path));
-    if (create_directory_if_not_exists(year_path) != ESP_OK) return ESP_FAIL;
-
-    // /sdcard/YYYY/MM
-    strlcpy(month_path, year_path, sizeof(month_path));
-    strlcat(month_path, "/", sizeof(month_path));
-    char mbuf[4]; snprintf(mbuf, sizeof(mbuf), "%02d", month);
-    strlcat(month_path, mbuf, sizeof(month_path));
-    if (create_directory_if_not_exists(month_path) != ESP_OK) return ESP_FAIL;
-
-    // /sdcard/YYYY/MM/DD
-    strlcpy(day_path, month_path, sizeof(day_path));
-    strlcat(day_path, "/", sizeof(day_path));
-    char dbuf[4]; snprintf(dbuf, sizeof(dbuf), "%02d", day);
-    strlcat(day_path, dbuf, sizeof(day_path));
-    if (create_directory_if_not_exists(day_path) != ESP_OK) return ESP_FAIL;
-
-    // Çıkış 1: gün klasörü
-    if (out_date_dir && out_date_dir_cap) {
-        if (strnlen(day_path, sizeof(day_path)) + 1 > out_date_dir_cap) return ESP_FAIL;
-        strlcpy(out_date_dir, day_path, out_date_dir_cap);
-    }
-
-    // Çıkış 2: saat dosyası (HH.log)
-    if (out_hour_file && out_hour_file_cap) {
-        char hbuf[4]; snprintf(hbuf, sizeof(hbuf), "%02d", hour);
-        int n = snprintf(out_hour_file, out_hour_file_cap, "%s/%s.log", day_path, hbuf);
-        if (n <= 0 || (size_t)n >= out_hour_file_cap) return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "SD yol hazır: %s  |  saat dosyası: %s",
-             out_date_dir ? out_date_dir : "(yok)",
-             out_hour_file ? out_hour_file : "(yok)");
     return ESP_OK;
 }
 
@@ -337,3 +287,68 @@ bool storage_is_available(void)
 {
     return s_sd_mounted;
 }
+
+
+esp_err_t storage_write_frame(const char *frame)
+{
+    if (!s_sd_mounted) {
+        ESP_LOGW(TAG, "⚠️ SD Kart bağlı değil, kayıt yapılmadı.");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!frame || strlen(frame) == 0) {
+        ESP_LOGW(TAG, "⚠️ Kayıt edilecek veri boş.");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Tarih – saat bilgisi
+    char date_str[16], time_str[16];
+    time_if_get_date(date_str, sizeof(date_str));   // örn: "11/11/2025"
+    time_if_get_time(time_str, sizeof(time_str));   // örn: "16:52:56"
+
+    int day = 0, month = 0, year = 0;
+    int hour = 0, minute = 0, second = 0;
+
+    // Tarih formatı "DD/MM/YYYY"
+    sscanf(date_str, "%2d/%2d/%4d", &day, &month, &year);
+    // Saat formatı "HH:MM:SS"
+    sscanf(time_str, "%2d:%2d:%2d", &hour, &minute, &second);
+
+    char dir_path[256];
+    snprintf(dir_path, sizeof(dir_path), "%s/%04d/%02d/%02d",
+            SD_MOUNT_POINT, year, month, day);
+
+    // Klasörleri sırasıyla oluştur
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s", SD_MOUNT_POINT);
+    mkdir(tmp, 0755);
+    snprintf(tmp, sizeof(tmp), "%s/%04d", SD_MOUNT_POINT, year);
+    mkdir(tmp, 0755);
+    snprintf(tmp, sizeof(tmp), "%s/%04d/%02d", SD_MOUNT_POINT, year, month);
+    mkdir(tmp, 0755);
+    snprintf(tmp, sizeof(tmp), "%s/%04d/%02d/%02d", SD_MOUNT_POINT, year, month, day);
+    mkdir(tmp, 0755);
+
+    // 🔹 Dosya adı: HH-MM-SS.log
+    char file_path[256];
+    file_path[0] = '\0';
+    strlcpy(file_path, dir_path, sizeof(file_path));
+    strlcat(file_path, "/", sizeof(file_path));
+
+    char namebuf[32];
+    snprintf(namebuf, sizeof(namebuf), "%02d-%02d-%02d.log", hour, minute, second);
+    strlcat(file_path, namebuf, sizeof(file_path));
+
+    // Dosyaya yaz
+    FILE *f = fopen(file_path, "a");
+    if (!f) {
+        ESP_LOGE(TAG, "❌ Dosya açılamadı: %s (errno=%d)", file_path, errno);
+        return ESP_FAIL;
+    }
+
+    fwrite(frame, 1, strlen(frame), f);
+    fclose(f);
+
+    ESP_LOGI(TAG, "Frame saved to SD: %s", file_path);
+    return ESP_OK;
+    }
