@@ -1,188 +1,190 @@
 #include "data_sender.h"
 #include "cfg_if.h"
 #include "net_manager.h"
-
 #include "esp_log.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
+#include "data_parser.h"
+#include "time_if.h"
+#include "storage_spiffs.h"
 
 #include <string.h>
 #include <stdio.h>
-#include "data_parser.h"
 
-static const char *LOG_TAG_DATA_SENDER = "DATA_SENDER";
+#define DATA_SENDER_MAX_LINE_BYTES 512
+static const char *TAG = "DATA_SENDER";
 
-/* Gönderilecek satır için makul bir üst sınır (device + ts + 32 kanal) */
-#define DATA_SENDER_MAX_LINE_BYTES  512
-
-/* ---- Device ID geçici override (sadece test için) ---- */
-static char device_id_override_buf[64] = {0};
-
-
-
-void data_sender_set_device_id_override(const char *device_id_override)
+/* ==========================================================
+ * 1️⃣ FRAME OLUŞTURMA
+ * ========================================================== */
+static bool data_sender_build_frame(const hd32mt_data_t *record,
+                                    int total_channels,
+                                    const char *manual_timestamp,
+                                    char *out_frame,
+                                    size_t out_cap)
 {
-    if (device_id_override && device_id_override[0] != '\0') {
-        snprintf(device_id_override_buf, sizeof device_id_override_buf, "%s", device_id_override);
+    if (!record || !out_frame || out_cap == 0) return false;
+
+    char timestamp[24];
+    if (manual_timestamp && strlen(manual_timestamp) > 5) {
+        strncpy(timestamp, manual_timestamp, sizeof(timestamp));
+        timestamp[sizeof(timestamp) - 1] = '\0';
     } else {
-        device_id_override_buf[0] = '\0'; // override kapat
+        time_if_get_formatted_timestamp(timestamp, sizeof(timestamp)); 
     }
-}
-/* ---------------------- TCP yardımcıları ---------------------- */
 
-/**
- * Tek satırı (NULL sonlandırıcı hariç) RAW TCP ile gönderir.
- * Hercules davranışına benzer: TCP_NODELAY açık, write sonrası SHUT_WR,
- * kısa bir recv ile "$SEND$" beklenir ve alınır alınmaz soket kapatılır.
- */
-static bool tcp_send_single_line_and_close(const char *server_host,
-                                           int         server_port,
-                                           const char *line_to_send)
-{
-    if (!server_host || !line_to_send || server_port <= 0) {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "tcp_send_single_line_and_close: invalid args");
+    const device_cfg_t *cfg = cfg_get();
+    if (!cfg) {
+        ESP_LOGE(TAG, "Config not available!");
         return false;
     }
-
-    struct addrinfo hints = {0}, *addr_list = NULL;
-    char server_port_str[16];
-    int n = snprintf(server_port_str, sizeof server_port_str, "%d", server_port);
-    if (n < 0 || n >= (int)sizeof(server_port_str)) {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "Port string overflow");
+    const char *manual_device_id = "00-08-DC-20-00-59";
+    size_t offset = 0;
+    int written = snprintf(out_frame + offset, out_cap - offset,
+                           "$%s$%s$%d$",
+                           manual_device_id, //cfg->device_id,
+                           timestamp,
+                           total_channels);
+    if (written < 0 || (size_t)written >= out_cap - offset)
         return false;
-}
+    offset += written;
 
-    hints.ai_socktype = SOCK_STREAM;
-
-    int gai = getaddrinfo(server_host, server_port_str, &hints, &addr_list);
-    if (gai != 0 || !addr_list) {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "getaddrinfo failed: %d", gai);
-        return false;
+    for (int i = 0; i < total_channels; ++i) {
+        float val = (i < record->sensor_count) ? record->sensors[i] : 0.0f;
+        written = snprintf(out_frame + offset, out_cap - offset, "%.2f$", val);
+        if (written < 0 || (size_t)written >= out_cap - offset)
+            return false;
+        offset += written;
     }
 
-    int socket_fd = -1;
-    for (struct addrinfo *it = addr_list; it; it = it->ai_next) {
-        socket_fd = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
-        if (socket_fd < 0) continue;
-
-        int one = 1;
-        setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-
-        struct timeval io_timeout = { .tv_sec = 5, .tv_usec = 0 };
-        setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof io_timeout);
-        setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof io_timeout);
-
-        if (connect(socket_fd, it->ai_addr, it->ai_addrlen) == 0) break;
-
-        close(socket_fd);
-        socket_fd = -1;
-    }
-    freeaddrinfo(addr_list);
-
-    if (socket_fd < 0) {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "connect failed");
-        return false;
-    }
-
-    size_t line_length = strlen(line_to_send);
-    ssize_t send_result = send(socket_fd, line_to_send, line_length, 0);
-    if (send_result != (ssize_t)line_length) {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "send failed (%d/%u)", (int)send_result, (unsigned)line_length);
-        close(socket_fd);
-        return false;
-    }
-
-    // Yazmayı kapat: sunucuya “gönderim bitti” sinyali
-    shutdown(socket_fd, SHUT_WR);
-
-    // Kısa bir yanıt bekle (çoğu sunucu "$SEND$" döner). Görür görmez kapat.
-    char response_buffer[64];
-    int recv_len = recv(socket_fd, response_buffer, sizeof(response_buffer) - 1, 0);
-    if (recv_len > 0) {
-        response_buffer[recv_len] = '\0';
-        ESP_LOGI(LOG_TAG_DATA_SENDER, "TCP RESPONSE: %s", response_buffer);
-        // "$SEND$" yakalandığında daha fazla beklemiyoruz.
-    }
-
-    close(socket_fd);
+    snprintf(out_frame + offset, out_cap - offset, "\r\n");
     return true;
 }
 
-/* -------------------- Frame oluşturma ve gönderim -------------------- */
+/* ==========================================================
+ * 2️⃣ SUNUCUYA GÖNDERME
+ * ========================================================== */
+static bool data_sender_send_to_server(const char *frame)
+{
+    const device_cfg_t *cfg = cfg_get();
+    if (!cfg || !frame) return false;
 
-bool data_sender_send_frame_from_record(const hd32mt_data_t  *record,
+    if (!net_manager_is_connected()) {
+        ESP_LOGW(TAG, "Network not connected");
+        return false;
+    }
+
+    struct addrinfo hints = {0}, *res = NULL;
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%ld", cfg->server_port);
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(cfg->server_host, port_str, &hints, &res) != 0 || !res) {
+        ESP_LOGE(TAG, "getaddrinfo failed");
+        return false;
+    }
+
+    int sock = -1;
+    for (struct addrinfo *it = res; it; it = it->ai_next) {
+        sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (sock < 0) continue;
+
+        int one = 1;
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+        struct timeval timeout = { .tv_sec = 5, .tv_usec = 0 };
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        if (connect(sock, it->ai_addr, it->ai_addrlen) == 0)
+            break;
+
+        close(sock);
+        sock = -1;
+    }
+    freeaddrinfo(res);
+
+    if (sock < 0) {
+        ESP_LOGE(TAG, "connect failed");
+        return false;
+    }
+
+    size_t len = strlen(frame);
+    ssize_t sent = send(sock, frame, len, 0);
+    if (sent != (ssize_t)len) {
+        ESP_LOGE(TAG, "send failed (%d/%u)", (int)sent, (unsigned)len);
+        close(sock);
+        return false;
+    }
+
+    shutdown(sock, SHUT_WR);  // gönderim bitti sinyali
+
+    // 🔸 kısa bir yanıt bekle
+    char resp[64];
+    int rcv = recv(sock, resp, sizeof(resp) - 1, 0);
+    if (rcv > 0) {
+        resp[rcv] = '\0';
+        ESP_LOGI(TAG, "Server response: %s", resp);
+    }
+
+    close(sock);
+    ESP_LOGI(TAG, "Frame sent OK");
+    return true;
+}
+
+
+/* ==========================================================
+ * 3️⃣ SD KARTA KAYDETME
+ * ========================================================== */
+static bool data_sender_save_to_sd(const char *frame)
+{
+    if (!frame || !storage_is_available()) {
+        ESP_LOGW(TAG, "SD not available");
+        return false;
+    }
+
+    char date_str[16], time_str[16];
+    time_if_get_date(date_str, sizeof(date_str));
+    time_if_get_time(time_str, sizeof(time_str));
+
+    int day, month, year, hour, minute, second;
+    sscanf(date_str, "%2d/%2d/%4d", &day, &month, &year);
+    sscanf(time_str, "%2d:%2d:%2d", &hour, &minute, &second);
+
+    char dir_path[128], file_path[128];
+    if (storage_prepare_paths_manual(year, month, day, hour,
+                                     dir_path, sizeof(dir_path),
+                                     file_path, sizeof(file_path)) != ESP_OK)
+        return false;
+
+    FILE *f = fopen(file_path, "a");
+    if (!f) {
+        ESP_LOGE(TAG, "File open failed: %s", file_path);
+        return false;
+    }
+
+    fwrite(frame, 1, strlen(frame), f);
+    fclose(f);
+    ESP_LOGI(TAG, "Frame saved to SD: %s", file_path);
+    return true;
+}
+
+/* ==========================================================
+ * 4️⃣ KOORDİNE EDİCİ (ANA FONKSİYON)
+ * ========================================================== */
+bool data_sender_send_frame_from_record(const hd32mt_data_t *record,
                                         int total_channels,
                                         const char *formatted_timestamp)
 {
-    if (!record || total_channels <= 0 || !formatted_timestamp || formatted_timestamp[0] == '\0') {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "data_sender_send_frame_from_record: invalid args");
+
+    char frame[DATA_SENDER_MAX_LINE_BYTES];
+    if (!data_sender_build_frame(record, total_channels, formatted_timestamp,
+                             frame, sizeof(frame))) {
+        ESP_LOGE(TAG, "Frame build failed");
         return false;
     }
 
-    const device_cfg_t *device_config = cfg_get();
-    if (!device_config) {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "device_config is null");
-        return false;
-    }
-
-    if (!net_manager_is_connected()) {
-        ESP_LOGW(LOG_TAG_DATA_SENDER, "network not connected, frame not sent");
-        return false;
-    }
-
-    const char *effective_device_id =
-        (device_id_override_buf[0] != '\0') ? device_id_override_buf
-                                            : device_config->device_id;
-
-    // $<device>$<yy/mm/dd-HH:MM:SS>$<N>$
-    char frame_line[DATA_SENDER_MAX_LINE_BYTES];
-    size_t write_offset = 0;
-
-    int written = snprintf(frame_line + write_offset,
-                           sizeof(frame_line) - write_offset,
-                           "$%s$%s$%d$",
-                           effective_device_id,
-                           formatted_timestamp,
-                           total_channels);
-    if (written < 0 || (size_t)written >= sizeof(frame_line) - write_offset) {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "frame header overflow");
-        return false;
-    }
-    write_offset += (size_t)written;
-
-    // Kanal değerlerini sırayla yaz (eksikse 0.00 ile doldur, fazlaysa kes)
-    for (int channel_index = 1; channel_index <= total_channels; ++channel_index) {
-        float channel_value = 0.0f;
-        int   record_index  = channel_index - 1;
-
-        if (record_index < record->sensor_count) {
-            channel_value = record->sensors[record_index];
-        }
-
-        written = snprintf(frame_line + write_offset,
-                           sizeof(frame_line) - write_offset,
-                           "%.2f$",
-                           (double)channel_value);
-        if (written < 0 || (size_t)written >= sizeof(frame_line) - write_offset) {
-            ESP_LOGE(LOG_TAG_DATA_SENDER, "frame body overflow at ch=%d", channel_index);
-            return false;
-        }
-        write_offset += (size_t)written;
-    }
-
-    // Satırı CRLF ile bitir
-    written = snprintf(frame_line + write_offset,
-                       sizeof(frame_line) - write_offset,
-                       "\r\n");
-    if (written < 0 || (size_t)written >= sizeof(frame_line) - write_offset) {
-        ESP_LOGE(LOG_TAG_DATA_SENDER, "frame ending overflow");
-        return false;
-    }
-
-    ESP_LOGI(LOG_TAG_DATA_SENDER, "FRAME TO SEND: %s", frame_line);
-
-    // TCP yoluyla gönder
-    return tcp_send_single_line_and_close(device_config->server_host,
-                                          (int)device_config->server_port,
-                                          frame_line);
+    bool net_ok = data_sender_send_to_server(frame);
+    data_sender_save_to_sd(frame);  // İnternet olsa da olmasa da SD’ye yaz
+    return net_ok;
 }

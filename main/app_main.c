@@ -3,125 +3,188 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_err.h"
-#include "driver/gpio.h"
 #include "nvs_flash.h"
-// Tüm bileşen arayüzlerini dahil et
+#include "driver/gpio.h"
+
+/* ---- Modül Başlıkları ---- */
 #include "cfg_if.h"
-#include "storage_if.h"
+#include "storage_spiffs.h"
 #include "time_if.h"
 #include "data_parser.h"
-#include "ble_system_if.h"
-#include "include/state_machine.h"
-#include "ethernet_init.h"
-#include "net_manager.h"
-#include "serial_if.h"
 #include "telemetry_service.h"
 #include "data_sender.h"
+#include "net_manager.h"
+#include "serial_if.h"
+#include "ble_system_if.h"
 
 
 static const char *TAG = "APP_MAIN";
 
-// ----------------------------------------------------
-// FreeRTOS Görev Tanımları
-// ----------------------------------------------------
 
-void data_collector_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Data Collector Görevi Başlatıldı.");
-    while (1) {
-        // ... Veri toplama mantığı ...
-        vTaskDelay(pdMS_TO_TICKS(1000));
+
+/* ---------------------------- SPIFFS İNİTİALİZASYONU ---------------------------- */
+#include "esp_spiffs.h"
+
+static void init_spiffs(void)
+{
+    esp_vfs_spiffs_conf_t conf = {
+        .base_path = "/spiffs",
+        .partition_label = "storage",
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+
+    esp_err_t ret = esp_vfs_spiffs_register(&conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE("SPIFFS", "Mount failed: %s", esp_err_to_name(ret));
+        return;
     }
+
+    ESP_LOGI("SPIFFS", "SPIFFS mount OK");
 }
 
-void comm_manager_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Haberleşme Yöneticisi Görevi Başlatıldı.");
-    while (1) {
-        // ... Haberleşme mantığı ...
-        vTaskDelay(pdMS_TO_TICKS(60000));
-    }
+/* ---------------------------- MANUEL VERİ GÖNDERİM TESTİ ---------------------------- */
+static void test_manual_send_task(void *arg)
+{
+    ESP_LOGI("TEST_MANUAL", "Manuel veri gönderim testi başlıyor...");
+
+    // Elle oluşturulmuş veri kaydı
+    hd32mt_data_t record = {0};
+
+    // Elle kanal sayısı ve değerleri
+    record.sensor_count = 10;
+    record.sensors[0] = 12.34;
+    record.sensors[1] = 56.78;
+    record.sensors[2] = 90.12;
+
+    // Zamanı elle verelim
+    const char *manual_timestamp = "11/11/05-14:52:56";
+
+    // Cihaz ID'si de test amaçlı sabit
+    const char *manual_device_id = "00-08-DC-20-00-59";
+
+    // FRAME oluşturma için override (data_sender.c içindeki cfg_get yerine kullanacağız)
+    ESP_LOGI("TEST_MANUAL", "Test verileri:");
+    ESP_LOGI("TEST_MANUAL", "Device ID  : %s", manual_device_id);
+    ESP_LOGI("TEST_MANUAL", "Timestamp  : %s", manual_timestamp);
+    ESP_LOGI("TEST_MANUAL", "Channels   : %d", record.sensor_count);
+    ESP_LOGI("TEST_MANUAL", "Values     : %.2f, %.2f, %.2f",
+             record.sensors[0], record.sensors[1], record.sensors[2]);
+
+    // Burada data_sender fonksiyonuna doğrudan çağrı yapıyoruz
+    bool ok = data_sender_send_frame_from_record(&record,
+                                                 record.sensor_count,
+                                                 NULL);
+
+    ESP_LOGI("TEST_MANUAL", "Gönderim sonucu: %s", ok ? "OK" : "FAIL");
+
+    vTaskDelete(NULL);
 }
-void app_main(void) {
-    ESP_LOGI(TAG, "--- Sistem Başlatılıyor: Donanım/Yazılım Init Evresi ---");
-    
-    /* 1. Kalıcı Hafıza */
+/* ---------------------------- TEST VERİ PARSİNG VE GÖNDERİMİ ---------------------------- */
+
+static const char *TAG_TEST = "TEST_INJECT";
+
+static void test_inject_task(void *arg)
+{
+    FILE *f = fopen("/spiffs/DELTA SAMPLE DATA.txt", "r");  // SPIFFS'ten okuyoruz
+    if (!f) {
+        ESP_LOGE(TAG_TEST, "Dosya açılamadı!");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        // Satırdaki \r\n karakterlerini temizle
+        char *p = strchr(line, '\r'); if (p) *p = '\0';
+        p = strchr(line, '\n'); if (p) *p = '\0';
+
+        if (strlen(line) < 3) continue;  // boş satır geç
+
+        ESP_LOGI(TAG_TEST, "Injecting: %s", line);
+
+        // 1️⃣ Parser’a gönder
+        hd32mt_data_t parsed_record = {0};
+        if (parse_hd32mt_record(line, &parsed_record)) {
+            ESP_LOGI(TAG_TEST, "Parse OK, %d kanal", parsed_record.sensor_count);
+
+            // 2️⃣ Sender’a gönder
+            bool ok = data_sender_send_frame_from_record(&parsed_record,
+                                                         parsed_record.sensor_count,
+                                                         NULL);
+            ESP_LOGI(TAG_TEST, "Send result: %s", ok ? "OK" : "FAIL");
+        } else {
+            ESP_LOGW(TAG_TEST, "Parse FAIL: %s", line);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));  // her satır arasında 1 sn bekle
+    }
+
+    fclose(f);
+    ESP_LOGI(TAG_TEST, "Test veri enjeksiyonu tamamlandı.");
+    vTaskDelete(NULL);
+}
+
+
+/* ---------------------------- ANA GİRİŞ ---------------------------- */
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "==============================");
+    ESP_LOGI(TAG, "     Sistem Başlatılıyor      ");
+    ESP_LOGI(TAG, "==============================");
+
+    /* 1️⃣ Kalıcı hafıza (NVS) ve cihaz konfigürasyonu */
+    ESP_ERROR_CHECK(nvs_flash_init());
     cfg_init();
     const device_cfg_t *cfg = cfg_get();
-    ESP_LOGI("MAIN", "Cihaz ID: %s", cfg->device_id);
+    ESP_LOGI(TAG, "Cihaz ID: %s", cfg->device_id);
+    
+    init_spiffs();
 
-    /* 2. Temel Donanımlar */
-    ESP_ERROR_CHECK(time_init());              // RTC veya SNTP
-    // SD’yi başlat
+    /* 2️⃣ RTC (time_if) */
+    ESP_ERROR_CHECK(time_if_init());
+
+    /* 3️⃣ SD kart (storage_if) */
     if (storage_init() != ESP_OK || !storage_is_available()) {
-        ESP_LOGW("APP_MAIN", "SD yok → internete gonderime DEVAM, yerel arşiv YOK.");
+        ESP_LOGW(TAG, "SD kart bulunamadı — sadece ağ gönderimi yapılacak.");
     } else {
-        // RTC yok: manuel tarih-saat
-        int y = 2025, m = 11, d = 10, h = 17;
-
-        char date_dir[128];
-        char hour_file[160];
-        if (storage_prepare_paths_manual(y, m, d, h, date_dir, sizeof(date_dir),
-                                        hour_file, sizeof(hour_file)) == ESP_OK) {
-            ESP_LOGI("APP_MAIN", "Klasörler hazır: %s | Saat dosyası: %s", date_dir, hour_file);
-
-            // İLERDE: her gönderdiğin $...$ satırını hour_file’a da ekle:
-            // const char *line = "$00-08-dc-20-00-59$...$\r\n";
-            // storage_write_file(hour_file + strlen("/sdcard"), line, strlen(line), true);
-            // (storage_write_file iç path'e SD_MOUNT_POINT ekliyor; istersen
-            //  oraya küçük bir 'write_raw_line_to_sd(const char*)' helper da ekleriz.)
-        }
+        ESP_LOGI(TAG, "SD kart hazır ✅");
     }
 
-    
-    /* 3. Haberleşme Katmanı */
-    ESP_ERROR_CHECK(nvs_flash_init());
-    net_manager_set_mode(NET_MODE_ETHERNET);  // Varsayılan Ethernet
+    /* 4️⃣ Ağ yöneticisi (Ethernet varsayılan) */
+    net_manager_set_mode(NET_MODE_ETHERNET);
     net_manager_create_task();
-
-    /* 4. BLE */
-    ESP_ERROR_CHECK(ble_system_init());
 
     ESP_LOGI(TAG, "Ağ bağlantısı bekleniyor...");
     while (!net_manager_is_connected()) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
-    ESP_LOGI(TAG, "Ağ bağlı ✅");
-    
-    // 5) Telemetri hattini tek komutla baslat (10 kanal ornek)
-    bool ok = telemetry_service_start(/*total_channel_count=*/10);
-    if (!ok) {
-        ESP_LOGE(TAG, "Telemetri servisi baslamadi!");
+    ESP_LOGI(TAG, "Ağ bağlantısı kuruldu ✅");
+
+    /* 5️⃣ Telemetri servisi */
+    if (!telemetry_service_start(/* toplam kanal sayısı */ 10)) {
+        ESP_LOGE(TAG, "Telemetri servisi başlatılamadı!");
+    } else {
+        ESP_LOGI(TAG, "Telemetri servisi başlatıldı ✅");
     }
-    /* 6. Uygulama Servisleri ve Durum Makinesi */
-    ESP_ERROR_CHECK(state_machine_init());
 
-    
-    /* 7. FreeRTOS Görevleri */
-    xTaskCreate(data_collector_task, "DATA_COLL", 4096, NULL, 5, NULL);
-    xTaskCreate(comm_manager_task, "COMM_MGR", 6144, NULL, 4, NULL);
+    /* 6️⃣ BLE */
+    ESP_ERROR_CHECK(ble_system_init());
 
 
-    // --- SADECE TEST İÇİN: device_id'yi elden ver ---
-    data_sender_set_device_id_override("00-08-DC-20-00-59");
+    //xTaskCreate(test_inject_task, "test_inject_task", 4096, NULL, 5, NULL);
+    xTaskCreate(test_manual_send_task, "test_manual_send_task", 4096, NULL, 5, NULL);
 
-    // Tek atımlık test çerçevesi:
-    //float ch[10] = {0};
-    //ch[0] = 12.34f; // ch1
-    //ch[1] = 23.45f; // ch2
-    //ch[2] = 34.56f; // ch3
-    //ch[3] = 45.67f; // ch4
-    //ch[4] = 56.78f; // ch5
-    //ch[5] = 67.89f; // ch6
-    //ch[6] = 10.00f; // ch7
-    //ch[7] = 20.00f; // ch8
-    //ch[8] = 30.00f; // ch9
-    //ch[9] = 40.00f; // ch10
 
-    //char ts[24];
-    //snprintf(ts, sizeof ts, "10/11/05-16:06:50"); // "yy/mm/dd-HH:MM:SS"
+    ESP_LOGI(TAG, "==============================");
+    ESP_LOGI(TAG, "     Sistem Başlatıldı ✅     ");
+    ESP_LOGI(TAG, "==============================");
 
-    
-
-    //telemetry_send_test_frame(10, ts, ch, 10);
-
-    ESP_LOGI(TAG, "--- Sistem Başlatıldı ve Görevler Çalışıyor ---");
+    /* Uygulama sonsuz döngü */
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
+
+

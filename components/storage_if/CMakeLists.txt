@@ -3,3 +3,4 @@ idf_component_register(
     INCLUDE_DIRS "include"
     REQUIRES fatfs sdmmc driver spi_if
 )
+spiffs_create_partition_image(storage spiffs_image FLASH_IN_PROJECT)

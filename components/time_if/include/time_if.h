@@ -17,7 +17,7 @@ extern "C" {
  * @brief Zaman arayüzünü (SNTP/DS1302) başlatır.
  * @return esp_err_t ESP_OK veya hata kodu.
  */
-esp_err_t time_init(void);
+esp_err_t time_if_init(void);
 
 /**
  * @brief Cihazın mevcut saatini ve tarihini alır.
@@ -37,6 +37,11 @@ time_t time_get_epoch(void);
  * @return bool Senkronize ise true, değilse false.
  */
 bool time_is_synchronized(void);
+void time_if_get_formatted_timestamp(char *buffer, size_t len);
+void time_if_get_date(char *buffer, size_t len);
+void time_if_get_time(char *buffer, size_t len);
+
+
 
 #ifdef __cplusplus
 }

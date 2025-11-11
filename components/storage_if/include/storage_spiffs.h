@@ -1,5 +1,6 @@
-#ifndef STORAGE_IF_H
-#define STORAGE_IF_H
+#ifndef STORAGE_SPIFFS_H
+#define STORAGE_SPIFFS_H
+
 
 #include "esp_err.h"
 #include <stddef.h>

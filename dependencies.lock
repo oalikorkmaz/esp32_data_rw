@@ -1,4 +1,44 @@
 dependencies:
+  esp-idf-lib/ds1302:
+    component_hash: 6f806b4d18f651403efba34da61109ec025fb198e23adbfcda3454ef7b2b8920
+    dependencies:
+    - name: esp-idf-lib/esp_idf_lib_helpers
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 1.1.7
+  esp-idf-lib/esp_idf_lib_helpers:
+    component_hash: a8049b1e609679fb54b2d57b0399dd29c4d1fda09a797edac9926f7810aa5703
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32
+    - esp32c2
+    - esp32c3
+    - esp32c5
+    - esp32c6
+    - esp32c61
+    - esp32h2
+    - esp32p4
+    - esp32s2
+    - esp32s3
+    version: 1.3.10
   espressif/led_strip:
     component_hash: 223998f10cae6d81f2ad2dd3c1103c2221be298c708e37917482b0153f3ec64e
     dependencies:
@@ -14,8 +54,9 @@ dependencies:
       type: idf
     version: 5.5.1
 direct_dependencies:
+- esp-idf-lib/ds1302
 - espressif/led_strip
 - idf
-manifest_hash: 4a3ee7613d24171be17fd9f281af5c64809fc0bc9191c0ea06fcf9bdadc511cb
+manifest_hash: a76b85efd6b44d1313ab78240260fed49681c929620522fb87f7013d1a2ff3dd
 target: esp32s3
 version: 2.0.0
