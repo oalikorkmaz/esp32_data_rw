@@ -77,8 +77,7 @@ esp_err_t start_wifi_station(void)
 {
     if (wifi_initialized) {
         ESP_LOGW(TAG, "Wi-Fi zaten başlatılmış, yeniden init atlanıyor.");
-        esp_wifi_disconnect();
-        esp_wifi_connect();
+        stop_wifi_station();
         return ESP_OK;
     }
 
@@ -89,40 +88,40 @@ esp_err_t start_wifi_station(void)
 
     /* Netif */
     wifi_netif_handle = esp_netif_create_default_wifi_sta();
-
-
+    
+    
     /* Wi-Fi stack init */
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
+    
     /* NVS’ten kayıtlı SSID/şifre */
     char ssid[32] = {0}, pass[64] = {0};
     if (!load_wifi_credentials(ssid, sizeof(ssid), pass, sizeof(pass))) {
         ESP_LOGW(TAG, "Wi-Fi bilgisi bulunamadı (BLE üzerinden girilmeli).");
         return ESP_ERR_NOT_FOUND;
     }
-
+    
     wifi_config_t wifi_cfg = {0};
     strncpy((char *) wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid));
     strncpy((char *) wifi_cfg.sta.password, pass, sizeof(wifi_cfg.sta.password));
-
+    
     /* Event handler kayıtları */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                    ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                    IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
-
-    /* Wi-Fi mod ve başlatma */
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "Wi-Fi ağa bağlanıyor: %s", ssid);
-    wifi_initialized = true;
-    return ESP_OK;
-}
-
-/* ---------------- Bağlantı durumu ---------------- */
+        ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+            IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+            
+            /* Wi-Fi mod ve başlatma */
+            ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+            ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
+            ESP_ERROR_CHECK(esp_wifi_start());
+            
+            ESP_LOGI(TAG, "Wi-Fi ağa bağlanıyor: %s", ssid);
+            wifi_initialized = true;
+            return ESP_OK;
+        }
+        
+        /* ---------------- Bağlantı durumu ---------------- */
 bool wifi_is_connected(void)
 {
     wifi_mode_t mode;
@@ -162,32 +161,26 @@ void stop_wifi_station(void)
 
     ESP_LOGI(TAG, "Wi-Fi bağlantısı durduruluyor...");
 
-    esp_err_t err;
+    // 1️⃣ Wi-Fi stop
+    esp_wifi_stop();    // ESP_ERR_WIFI_NOT_INIT olabilir, sorun değil
+    esp_wifi_deinit();  // MUTLAKA gerekli!
 
-    /* 1️⃣ Wi-Fi’yi durdur */
-    err = esp_wifi_stop();
-    if (err == ESP_ERR_WIFI_NOT_INIT) {
-        ESP_LOGW(TAG, "Wi-Fi zaten durdurulmuş.");
-    } else {
-        ESP_ERROR_CHECK(err);
-    }
+    // 2️⃣ Event handlerları kaldır
+    esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler);
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler);
 
-    /* 2️⃣ Event handler’ları kaldır */
-    ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler));
-    ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler));
-
-    /* 3️⃣ Wi-Fi sürücüsünü kapat */
-    ESP_ERROR_CHECK(esp_wifi_deinit());
-
-    /* 4️⃣ Netif’i yok et */
-    esp_netif_t *wifi_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (wifi_netif) {
+    // 3️⃣ Netif destroy (doğru yöntem)
+    if (wifi_netif_handle) {
         ESP_LOGI(TAG, "Wi-Fi netif yok ediliyor...");
-        esp_netif_destroy(wifi_netif);
+        esp_netif_destroy(wifi_netif_handle);
+        wifi_netif_handle = NULL;   // <-- KRİTİK!
     }
 
+    // 4️⃣ Durum bayrakları
     wifi_initialized = false;
     s_wifi_connected = false;
+    s_wifi_fail_count = 0;
 
     ESP_LOGI(TAG, "Wi-Fi bağlantısı tamamen kapatıldı.");
 }
+

@@ -1,121 +1,148 @@
 #include "spi_if.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
-#include "driver/spi_common.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <stdlib.h>
 
 static const char *TAG = "SPI_IF";
 
-/*
- * Her SPI host için durum bilgisi.
- * ESP32-S3'te genelde 3 SPI host vardır:
- * SPI1 (flash), SPI2 (HSPI), SPI3 (VSPI)
- */
-typedef struct {
-    bool initialized;
-    spi_bus_lock_handle_t lock_handle;
-} spi_if_bus_ctx_t;
-
+/* Device context yapısı */
 typedef struct {
     spi_host_device_t host;
     gpio_num_t cs_io;
-    spi_bus_lock_dev_handle_t lock_dev;
+    SemaphoreHandle_t mutex;  // Her device'ın kendi mutex'i
 } spi_if_device_ctx_t;
 
-static spi_if_bus_ctx_t s_spi_bus_ctx[SOC_SPI_PERIPH_NUM] = { 0 };
+/* Bus context yapısı */
+typedef struct {
+    bool initialized;
+    SemaphoreHandle_t bus_mutex;  // Bus seviyesinde mutex
+} spi_if_bus_ctx_t;
 
+static spi_if_bus_ctx_t s_spi_bus_ctx[SOC_SPI_PERIPH_NUM] = {0};
+
+/* ============================================
+ * SPI BUS INIT
+ * ============================================ */
 esp_err_t spi_if_init(spi_host_device_t host, const spi_bus_config_t *buscfg)
 {
     if (host >= SOC_SPI_PERIPH_NUM) {
-        ESP_LOGE(TAG, "Geçersiz SPI host: %d", host);
         return ESP_ERR_INVALID_ARG;
     }
 
     if (s_spi_bus_ctx[host].initialized) {
-        ESP_LOGD(TAG, "SPI%d zaten başlatılmış.", host + 1);
+        ESP_LOGD(TAG, "SPI%d zaten init edilmiş.", host + 1);
         return ESP_OK;
     }
 
+    // SPI bus'ı başlat
     esp_err_t ret = spi_bus_initialize(host, buscfg, SPI_DMA_CH_AUTO);
+    
     if (ret == ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "SPI%d zaten initialize edilmiş durumda.", host + 1);
-    } else {
-        ESP_ERROR_CHECK(ret);
+        ESP_LOGW(TAG, "SPI%d daha önce init edilmiş.", host + 1);
+        s_spi_bus_ctx[host].initialized = true;
+        
+        // Bus mutex zaten varsa kullan, yoksa oluştur
+        if (!s_spi_bus_ctx[host].bus_mutex) {
+            s_spi_bus_ctx[host].bus_mutex = xSemaphoreCreateMutex();
+            if (!s_spi_bus_ctx[host].bus_mutex) {
+                ESP_LOGE(TAG, "Bus mutex oluşturulamadı!");
+                return ESP_ERR_NO_MEM;
+            }
+        }
+        return ESP_OK;
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SPI%d init hatası: %s", host + 1, esp_err_to_name(ret));
+        return ret;
+    }
+
+    // Bus mutex oluştur
+    s_spi_bus_ctx[host].bus_mutex = xSemaphoreCreateMutex();
+    if (!s_spi_bus_ctx[host].bus_mutex) {
+        ESP_LOGE(TAG, "Bus mutex oluşturulamadı!");
+        spi_bus_free(host);
+        return ESP_ERR_NO_MEM;
     }
 
     s_spi_bus_ctx[host].initialized = true;
 
-    esp_err_t lock_ret = spi_bus_lock_init(host);
-    if (lock_ret != ESP_OK && lock_ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "SPI%d bus lock init hatası: %s", host + 1, esp_err_to_name(lock_ret));
-        return lock_ret;
-    }
-    s_spi_bus_ctx[host].lock_handle = spi_bus_lock_get_by_id(host);
-    if (!s_spi_bus_ctx[host].lock_handle) {
-        ESP_LOGE(TAG, "SPI%d için bus lock handle alınamadı", host + 1);
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "SPI%d başarıyla başlatıldı.", host + 1);
+    ESP_LOGI(TAG, "✅ SPI%d initialized with mutex lock", host + 1);
     return ESP_OK;
 }
 
-esp_err_t spi_if_register_device(spi_host_device_t host, gpio_num_t cs_io, spi_if_device_handle_t *out_handle)
+/* ============================================
+ * DEVICE REGISTER
+ * ============================================ */
+esp_err_t spi_if_register_device(spi_host_device_t host,
+                                 gpio_num_t cs_io,
+                                 spi_if_device_handle_t *out_handle)
 {
     if (!out_handle) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (host >= SOC_SPI_PERIPH_NUM || !s_spi_bus_ctx[host].initialized) {
-        ESP_LOGE(TAG, "SPI%d bus henüz başlatılmamış.", host + 1);
+    if (!s_spi_bus_ctx[host].initialized) {
+        ESP_LOGE(TAG, "SPI%d henüz init edilmemiş!", host + 1);
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Device context oluştur
     spi_if_device_ctx_t *ctx = calloc(1, sizeof(spi_if_device_ctx_t));
     if (!ctx) {
         return ESP_ERR_NO_MEM;
     }
 
-    gpio_config_t cs_cfg = {
-        .pin_bit_mask = 1ULL << cs_io,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&cs_cfg));
-    gpio_set_level(cs_io, 1);
-
-    spi_bus_lock_dev_config_t devcfg = {0};
-#ifdef SPI_BUS_LOCK_DEV_FLAG_CS_REQUIRED
-    devcfg.flags = SPI_BUS_LOCK_DEV_FLAG_CS_REQUIRED;
-#endif
-
-    esp_err_t ret = spi_bus_lock_register_dev(s_spi_bus_ctx[host].lock_handle, &devcfg, &ctx->lock_dev);
-    if (ret != ESP_OK) {
-        free(ctx);
-        return ret;
-    }
-
     ctx->host = host;
     ctx->cs_io = cs_io;
+
+    // CS pinini output olarak yapılandır
+    gpio_config_t io_conf = {
+        .pin_bit_mask = 1ULL << cs_io,
+        .mode = GPIO_MODE_OUTPUT,
+        .intr_type = GPIO_INTR_DISABLE,
+        .pull_down_en = false,
+        .pull_up_en = true,  // CS idle HIGH
+    };
+    gpio_config(&io_conf);
+    gpio_set_level(cs_io, 1);  // CS başlangıçta HIGH
+
+    // Device mutex oluştur
+    ctx->mutex = xSemaphoreCreateMutex();
+    if (!ctx->mutex) {
+        free(ctx);
+        return ESP_ERR_NO_MEM;
+    }
+
     *out_handle = ctx;
+
+    ESP_LOGI(TAG, "✅ Device registered (Host: SPI%d, CS: GPIO%d)", host + 1, cs_io);
     return ESP_OK;
 }
 
+/* ============================================
+ * DEVICE UNREGISTER
+ * ============================================ */
 void spi_if_unregister_device(spi_if_device_handle_t handle)
 {
-    if (!handle) {
-        return;
-    }
+    if (!handle) return;
 
     spi_if_device_ctx_t *ctx = (spi_if_device_ctx_t *)handle;
-    if (ctx->lock_dev) {
-        spi_bus_lock_unregister_dev(ctx->lock_dev);
+
+    if (ctx->mutex) {
+        vSemaphoreDelete(ctx->mutex);
     }
+
     free(ctx);
+    ESP_LOGD(TAG, "Device unregistered");
 }
 
+/* ============================================
+ * BUS LOCK ACQUIRE
+ * ============================================ */
 esp_err_t spi_if_bus_lock_acquire(spi_if_device_handle_t handle, TickType_t ticks_to_wait)
 {
     if (!handle) {
@@ -123,15 +150,49 @@ esp_err_t spi_if_bus_lock_acquire(spi_if_device_handle_t handle, TickType_t tick
     }
 
     spi_if_device_ctx_t *ctx = (spi_if_device_ctx_t *)handle;
-    return spi_bus_lock_acquire_start(ctx->lock_dev, ticks_to_wait);
-}
 
-void spi_if_bus_lock_release(spi_if_device_handle_t handle)
-{
-    if (!handle) {
-        return;
+    // Önce bus mutex'ini al
+    if (!s_spi_bus_ctx[ctx->host].bus_mutex) {
+        ESP_LOGE(TAG, "Bus mutex yok!");
+        return ESP_ERR_INVALID_STATE;
     }
 
+    if (xSemaphoreTake(s_spi_bus_ctx[ctx->host].bus_mutex, ticks_to_wait) != pdTRUE) {
+        ESP_LOGW(TAG, "Bus mutex alınamadı (timeout)");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // Sonra device mutex'ini al
+    if (xSemaphoreTake(ctx->mutex, ticks_to_wait) != pdTRUE) {
+        // Bus mutex'i geri ver
+        xSemaphoreGive(s_spi_bus_ctx[ctx->host].bus_mutex);
+        ESP_LOGW(TAG, "Device mutex alınamadı (timeout)");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // CS'yi aktif et (LOW)
+    gpio_set_level(ctx->cs_io, 0);
+
+    return ESP_OK;
+}
+
+/* ============================================
+ * BUS LOCK RELEASE
+ * ============================================ */
+void spi_if_bus_lock_release(spi_if_device_handle_t handle)
+{
+    if (!handle) return;
+
     spi_if_device_ctx_t *ctx = (spi_if_device_ctx_t *)handle;
-    spi_bus_lock_acquire_end(ctx->lock_dev);
+
+    // CS'yi pasif et (HIGH)
+    gpio_set_level(ctx->cs_io, 1);
+
+    // Device mutex'i serbest bırak
+    xSemaphoreGive(ctx->mutex);
+
+    // Bus mutex'i serbest bırak
+    if (s_spi_bus_ctx[ctx->host].bus_mutex) {
+        xSemaphoreGive(s_spi_bus_ctx[ctx->host].bus_mutex);
+    }
 }

@@ -360,6 +360,14 @@ esp_err_t storage_write_frame(const char *frame)
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (!s_sd_spi_lock) return ESP_ERR_INVALID_STATE;
+
+    esp_err_t lock_ret = spi_if_bus_lock_acquire(s_sd_spi_lock, pdMS_TO_TICKS(1000));
+    if (lock_ret != ESP_OK) {
+        ESP_LOGE(TAG, "[SD] LOCK alınamadı!");
+        return lock_ret;
+    }
+
     // Tarih – saat bilgisi
     char date_str[16], time_str[16];
     time_if_get_date(date_str, sizeof(date_str));   // örn: "11/11/2025"
@@ -407,6 +415,7 @@ esp_err_t storage_write_frame(const char *frame)
 
     fwrite(frame, 1, strlen(frame), f);
     fclose(f);
+    spi_if_bus_lock_release(s_sd_spi_lock);
 
     ESP_LOGI(TAG, "Frame saved to SD: %s", file_path);
     return ESP_OK;
