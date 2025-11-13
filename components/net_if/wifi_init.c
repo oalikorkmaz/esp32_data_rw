@@ -122,25 +122,25 @@ esp_err_t start_wifi_station(void)
         }
         
         /* ---------------- Bağlantı durumu ---------------- */
-bool wifi_is_connected(void)
-{
-    wifi_mode_t mode;
-    if (esp_wifi_get_mode(&mode) != ESP_OK || mode != WIFI_MODE_STA)
-        return false;
-
-    // Bağlantı aktif mi?
-    wifi_ap_record_t info;
-    if (esp_wifi_sta_get_ap_info(&info) == ESP_OK) {
-        // RSSI veya channel > 0 ise bağlı
-        if (info.primary != 0)
-            return true;
-    }
-
-    // IP halen mevcut mu?
-    esp_netif_t *wifi_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (wifi_netif) {
-        esp_netif_ip_info_t ip_info;
-        if (esp_netif_get_ip_info(wifi_netif, &ip_info) == ESP_OK) {
+        bool wifi_is_connected(void)
+        {
+            wifi_mode_t mode;
+            if (esp_wifi_get_mode(&mode) != ESP_OK || mode != WIFI_MODE_STA)
+            return false;
+            
+            // Bağlantı aktif mi?
+            wifi_ap_record_t info;
+            if (esp_wifi_sta_get_ap_info(&info) == ESP_OK) {
+                // RSSI veya channel > 0 ise bağlı
+                if (info.primary != 0)
+                return true;
+            }
+            
+            // IP halen mevcut mu?
+            esp_netif_t *wifi_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+            if (wifi_netif) {
+                esp_netif_ip_info_t ip_info;
+                if (esp_netif_get_ip_info(wifi_netif, &ip_info) == ESP_OK) {
             if (ip_info.ip.addr != 0 && s_wifi_connected)
                 return true;
         }

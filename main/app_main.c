@@ -148,7 +148,7 @@ void app_main(void)
     const device_cfg_t *cfg = cfg_get();
     ESP_LOGI(TAG, "Cihaz ID: %s", cfg->device_id);
     
-    init_spiffs();
+    //init_spiffs();
 
     /* 2️⃣ RTC (time_if) */
     ESP_ERROR_CHECK(time_if_init());
