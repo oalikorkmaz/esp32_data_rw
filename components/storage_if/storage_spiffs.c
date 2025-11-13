@@ -1,10 +1,13 @@
 #include "storage_spiffs.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "driver/gpio.h"
 #include "driver/sdspi_host.h"
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "driver/spi_common.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "spi_if.h"
 #include "cfg_if.h"
 #include "time_if.h"
@@ -20,17 +23,19 @@ static const char *TAG = "STORAGE_SD";
 /* ---------------------------------------------------- */
 /* SD Kart Donanım Pinleri */
 /* ---------------------------------------------------- */
+#define SD_PWR   1
 #define SD_MISO  37
 #define SD_MOSI  35
 #define SD_SCLK  36
-#define SD_CS    38
-#define SD_SPI_HOST  SPI2_HOST
+#define SD_CS    47
+#define SD_HOST  SPI2_HOST
 
 #define SD_MOUNT_POINT "/sdcard"
 
 /* Global değişkenler */
 static bool s_sd_mounted = false;
 static sdmmc_card_t *s_card = NULL;
+static spi_if_device_handle_t s_sd_spi_lock = NULL;
 
 
 
@@ -46,7 +51,13 @@ esp_err_t storage_spi_init(void)
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
     };
-    return spi_if_init(SPI2_HOST, &spi2_cfg);
+    ESP_ERROR_CHECK(spi_if_init(SD_HOST, &spi2_cfg));
+
+    if (!s_sd_spi_lock) {
+        ESP_ERROR_CHECK(spi_if_register_device(SD_HOST, SD_CS, &s_sd_spi_lock));
+    }
+
+    return ESP_OK;
 }
 
 /* ---------------------------------------------------- */
@@ -128,15 +139,39 @@ esp_err_t storage_init(void)
         ESP_LOGW(TAG, "⚠️ SD Kart zaten mount edilmiş.");
         return ESP_OK;
     }
-     // 1️⃣ SPI başlat
+
+    // 1️⃣ SPI başlat
     ESP_ERROR_CHECK(storage_spi_init());
+
+    if (SD_PWR >= 0) {
+        gpio_config_t pwr_cfg = {
+            .pin_bit_mask = 1ULL << SD_PWR,
+            .mode = GPIO_MODE_OUTPUT,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK(gpio_config(&pwr_cfg));
+        gpio_set_level(SD_PWR, 1);
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    bool lock_acquired = false;
+    if (s_sd_spi_lock) {
+        esp_err_t lock_ret = spi_if_bus_lock_acquire(s_sd_spi_lock, pdMS_TO_TICKS(1000));
+        if (lock_ret != ESP_OK) {
+            ESP_LOGE(TAG, "SD kart için SPI kilidi alınamadı: %s", esp_err_to_name(lock_ret));
+            return lock_ret;
+        }
+        lock_acquired = true;
+    }
 
     sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     slot_config.gpio_cs = SD_CS;
-    slot_config.host_id = SD_SPI_HOST;
+    slot_config.host_id = SD_HOST;
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SD_SPI_HOST;
+    host.slot = SD_HOST;
     host.max_freq_khz = SDMMC_FREQ_DEFAULT;
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -155,6 +190,9 @@ esp_err_t storage_init(void)
         } else {
             ESP_LOGE(TAG, "❌ SD Kart init hatası: %s", esp_err_to_name(ret));
         }
+        if (lock_acquired) {
+            spi_if_bus_lock_release(s_sd_spi_lock);
+        }
         return ret;
     }
 
@@ -169,6 +207,10 @@ esp_err_t storage_init(void)
     ESP_LOGI(TAG, "   Kapasite   : %llu MB", card_size_mb);
     ESP_LOGI(TAG, "   Tip        : %s", (s_card->ocr & BIT(30)) ? "SDHC/SDXC" : "SDSC");
 
+    if (lock_acquired) {
+        spi_if_bus_lock_release(s_sd_spi_lock);
+    }
+
     return ESP_OK;
 }
 
@@ -182,15 +224,32 @@ esp_err_t storage_deinit(void)
         return ESP_OK;
     }
 
+    bool lock_acquired = false;
+    if (s_sd_spi_lock) {
+        esp_err_t lock_ret = spi_if_bus_lock_acquire(s_sd_spi_lock, pdMS_TO_TICKS(1000));
+        if (lock_ret != ESP_OK) {
+            ESP_LOGE(TAG, "SD kart kilidi alınamadı: %s", esp_err_to_name(lock_ret));
+            return lock_ret;
+        }
+        lock_acquired = true;
+    }
+
     esp_err_t ret = esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, s_card);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "❌ SD Kart unmount başarısız: %s", esp_err_to_name(ret));
+        if (lock_acquired) {
+            spi_if_bus_lock_release(s_sd_spi_lock);
+        }
         return ret;
     }
 
     s_sd_mounted = false;
     s_card = NULL;
     ESP_LOGI(TAG, "💾 SD Kart unmount edildi.");
+
+    if (lock_acquired) {
+        spi_if_bus_lock_release(s_sd_spi_lock);
+    }
     return ESP_OK;
 }
 
